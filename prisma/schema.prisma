@@ -1,0 +1,897 @@
+// 異鄉座標 — Prisma Schema
+//
+// 設計原則：
+// - 沿用 lib/types.ts 既有的 Localized（zh-TW / en）欄位模式，每個雙語欄位拆成
+//   xxxZh / xxxEn 兩欄，admin 後台可以直接對應一組輸入框，不需要額外處理 JSON。
+// - 陣列型欄位（例如中文學習的 vocabulary/sentences、校園單位的
+//   exchangeStudentMayEncounter、行事曆的 taiwanCustoms）原本想用 Json 型別，但
+//   目前資料庫是 SQLite，Prisma 5.18 的 SQLite connector 不支援 Json 型別也不支援
+//   enum，所以改用 String 儲存 JSON.stringify 過的文字，應用程式端用
+//   lib/jsonFields.ts 做 parse/stringify，資料結構本身完全沒變。
+// - 每張表都有 order（排序）與 isPublished（是否發布/顯示），對應規格書要求的
+//   「啟用/停用、排序」。
+// - 開發／測試先用 SQLite（zero-config，npm install 完就能跑），正式上線時只要把
+//   datasource 換成 postgresql + DATABASE_URL 指到 Vercel Postgres/Supabase 即可，
+//   models 完全不用改。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // 測試/開發：SQLite，檔案存在 prisma/dev.db，免額外服務。
+  // 正式上線：改成 provider = "postgresql"，DATABASE_URL 指向 Vercel Postgres / Supabase。
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 管理員
+// ─────────────────────────────────────────────────────────────────────────
+
+model Admin {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 首頁公告（管理員手動撰寫的公告；與 lib/announcementGenerator.ts 的
+// 「行事曆自動產生的提醒」是兩個獨立來源，首頁會合併顯示，見 Phase 2 說明）
+// ─────────────────────────────────────────────────────────────────────────
+
+model Announcement {
+  id          String    @id @default(cuid())
+  // type 只會是 "permanent"（常駐公告，不需要日期，只要 isPublished 就一直
+  // 顯示）或 "holiday"（節假日公告，只有 startDate ~ endDate 這段期間內才
+  // 顯示）。兩種公告存在同一張表、同一個管理頁面，因為它們本質上都是「一則
+  // 公告」，只是顯示條件不同——這樣前台永遠只有一個資料來源，不會再出現
+  // 「後台看不到前台公告」的問題。以後如果要加第三種類型，直接在這個欄位
+  // 允許的字串值裡新增，應用層（API route）驗證，不需要改資料庫結構。
+  type        String    @default("permanent")
+  titleZh     String
+  titleEn     String
+  contentZh   String
+  contentEn   String
+  // enSource: JSON，例如 {"titleEn":"AUTO","contentEn":"MANUAL"}，記錄每個
+  // 英文欄位是系統自動翻譯的還是管理員手動編輯過的——AUTO 的欄位下次中文
+  // 修改時會重新翻譯，MANUAL 的欄位永遠不會被自動覆蓋。用 lib/jsonFields.ts
+  // 的 fromJsonField/toJsonField 讀寫（SQLite 不支援 Json 型別，見上方說明）。
+  enSource    String? // { titleEn: "AUTO"|"MANUAL"|"PENDING", contentEn: ... }
+  image       String? // public URL or /uploads path
+  // startDate/endDate 只有 type="holiday" 才會用到；type="permanent" 的公告
+  // 兩個都是 null，不受日期限制，只要 isPublished 就一直顯示。
+  startDate   DateTime?
+  endDate     DateTime?
+  relatedHoliday String? // 相關節日（例如「中秋節」），純文字備註用，不影響顯示邏輯
+  order       Int       @default(0)
+  publishDate DateTime  @default(now())
+  isPublished Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 校園座標（culture Q&A + school-units，對應 lib/data/mockCampus.ts）
+// ─────────────────────────────────────────────────────────────────────────
+
+// SQLite（目前使用的資料庫）不支援 Prisma 的 enum 型別，也不支援 Json 型別，
+// 所以下面用 String 取代，實際允許的值由應用程式（API 路由）驗證與限制，
+// 不是 Schema 層級強制，但效果一樣：category 只會是 "culture" 或
+// "school_units" 這兩個字串之一（見 app/api/admin/campus/route.ts）。
+model CampusSpot {
+  id                   String   @id // 沿用原本的 slug id（如 why-flag-raising）
+  category             String   // "culture" | "school_units"
+  image                String?
+  nameZh               String
+  nameEn               String
+  descriptionZh        String
+  descriptionEn        String
+  detailsZh            String?
+  detailsEn            String?
+  hoursZh              String?
+  hoursEn              String?
+  tipsZh               String?
+  tipsEn               String?
+  mainResponsibilityZh String?
+  mainResponsibilityEn String?
+  enSource             String? // { nameEn, descriptionEn, mainResponsibilityEn: "AUTO"|"MANUAL"|"PENDING" }
+  // 手機版專屬的排列順序／顯示設定——跟桌面版的 order/isPublished 分開，管理員
+  // 可以讓同一筆內容在手機版跟桌面版有不同的順序，或只在手機版隱藏，不影響
+  // 桌面版。mobileOrder 是 null 的時候，手機版沿用桌面版的 order 排序。
+  mobileOrder          Int?
+  mobileHidden         Boolean  @default(false)
+  // 各校時間資訊（升旗、午休這類「不同學校時間不同」的項目用）：JSON 陣列
+  // [{ "school": "屏東縣屏榮高級中學", "time": "7:45～8:00" }, ...]，顯示在
+  // 校園座標卡片的介紹文字下方。null／空陣列＝這張卡片不顯示時間格。
+  schoolTimes          String?
+  // exchangeStudentMayEncounter 原本是 Json，SQLite 不支援 Json 型別，
+  // 改用 String 儲存 JSON.stringify 過的文字，讀寫時由程式碼 JSON.parse /
+  // JSON.stringify（見 lib/jsonFields.ts），資料結構完全沒有改變。
+  // 內容仍然是：[{ "zh-TW": "...", "en": "..." }, ...]
+  exchangeStudentMayEncounter String?
+  order                Int      @default(0)
+  isPublished          Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 生活座標（對應 lib/data/mockLife.ts 的 LifeCategory > LifeItem）
+// ─────────────────────────────────────────────────────────────────────────
+
+model LifeCategory {
+  id            String     @id
+  nameZh        String
+  nameEn        String
+  icon          String
+  descriptionZh String
+  descriptionEn String
+  enSource      String? // { nameEn, descriptionEn: "AUTO"|"MANUAL"|"PENDING" }
+  order         Int        @default(0)
+  isPublished   Boolean    @default(true)
+  items         LifeItem[]
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+}
+
+model LifeItem {
+  id            String       @id
+  categoryId    String
+  category      LifeCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  titleZh       String
+  titleEn       String
+  detailZh      String
+  detailEn      String
+  fullDetailZh  String
+  fullDetailEn  String
+  image         String?
+  tipZh         String? // 選填的小提示（見 lib/data/mockLife.ts 的 tip 欄位）
+  tipEn         String?
+  enSource      String? // { titleEn, detailEn, fullDetailEn: "AUTO"|"MANUAL"|"PENDING" }
+  mobileOrder   Int? // 手機版專屬排序，null 時沿用桌面版 order（見 CampusSpot 的說明）
+  mobileHidden  Boolean      @default(false)
+  // officialLinks 原本想用 Json，SQLite 不支援，改用 String 儲存 JSON.stringify
+  // 過的文字（陣列），讀寫透過 lib/jsonFields.ts。內容仍是：
+  // [{ url, label: { "zh-TW": "...", "en": "..." } }, ...]
+  officialLinks String?
+  order         Int          @default(0)
+  isPublished   Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 中文學習（對應 lib/data/chineseLearning.ts 的 ChineseCategory > ChineseLevel）
+// ─────────────────────────────────────────────────────────────────────────
+
+model ChineseCategory {
+  id            String         @id
+  nameZh        String
+  nameEn        String
+  descriptionZh String
+  descriptionEn String
+  icon          String
+  order         Int            @default(0)
+  isPublished   Boolean        @default(true)
+  levels        ChineseLevel[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+}
+
+model ChineseLevel {
+  id         String          @id
+  categoryId String
+  category   ChineseCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  level      Int
+  titleZh    String
+  titleEn    String
+  // 以下三個欄位原本是 Json，SQLite 不支援 Json 型別，改用 String 儲存
+  // JSON.stringify 過的文字，讀寫時由 lib/jsonFields.ts 做 parse/stringify，
+  // 資料結構完全沒有改變。
+  // drink: { liquid, ice?, foam?, straw? }
+  drink      String
+  // vocabulary: [{ chinese, pinyin, english }, ...]
+  vocabulary String
+  // sentences: [{ speaker, chinese, pinyin, english }, ...]
+  sentences  String
+  image      String?
+  order      Int             @default(0)
+  isPublished Boolean        @default(true)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 中文學習 2.0（生活／校園 兩大分區，每個分區底下是可自由編排內容的關卡）
+//
+// 跟上面的 ChineseCategory/ChineseLevel 是完全獨立的兩套資料——舊的那套是
+// 「分類 → 關卡（固定飲料+單字+例句版面）」，這次要的是「分區（生活/校園）
+// → 關卡 → 可自由排序、自由決定頁面類型的學習頁」，資料結構完全不一樣，
+// 硬套在舊表上會很牽強，所以另外建了這幾張新表。舊表完全沒有被刪除或
+// 修改，資料還在。
+// ─────────────────────────────────────────────────────────────────────────
+
+// 關卡（例如「生活 第一關」）。track 只會是 "life" 或 "campus"。
+model ChineseStage {
+  id          String   @id @default(cuid())
+  track       String // "life" | "campus"
+  levelNumber Int // 第幾關，用來顯示「第 N 關」
+  titleZh     String   @default("") // 選填的自訂標題，留空就顯示「第 N 關」
+  titleEn     String   @default("")
+  order       Int      @default(0)
+  isPublished Boolean  @default(true)
+  pages       ChinesePage[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// 關卡裡的一頁學習內容。type 決定這一頁是漫畫/單字/哪一種題目，管理員可以
+// 自由決定一個關卡裡有幾頁、每頁是什麼類型、順序怎麼排——不是寫死
+// 「漫畫→單字→填空題」這個固定順序。
+model ChinesePage {
+  id          String   @id @default(cuid())
+  stageId     String
+  stage       ChineseStage @relation(fields: [stageId], references: [id], onDelete: Cascade)
+  type        String // "comic" | "vocabulary" | "fill_blank" | "multiple_choice" | "matching" | "true_false"
+  titleZh     String   @default("")
+  titleEn     String   @default("")
+  order       Int      @default(0)
+  isPublished Boolean  @default(true)
+  // 漫畫頁專用：JSON 陣列，可以放好幾張圖（不限制只能一張）。每張圖存原始
+  // 寬高，前端用這兩個數字算 aspect-ratio，保持原始比例、不拉伸不裁切。
+  // [{ url, width, height, captionZh, captionEn }]
+  // comicImages 是中文版；comicImagesEn 是英文版（格式相同，各自獨立的一組
+  // 圖片，不是同一張圖的不同語言說明）。allowFlip 控制前台是否顯示「點擊
+  // 翻轉」——只有一種語言版本時應該關閉，不然點擊會看到空白。
+  comicImages   String?
+  comicImagesEn String?
+  allowFlip     Boolean @default(true)
+  words       ChineseVocabWord[]
+  questions   ChineseQuestion[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// 單字頁裡的一個單字。中文／羅馬拼音維持人工輸入，不自動翻譯；語音直接用
+// 瀏覽器的 Web Speech API 唸中文（跟網站原本中文學習教材同一套語音方式），
+// 不需要另外上傳語音檔。
+model ChineseVocabWord {
+  id        String      @id @default(cuid())
+  pageId    String
+  page      ChinesePage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  hanzi     String // 中文
+  pinyin    String // 羅馬拼音
+  english   String // 英文
+  order     Int         @default(0)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+}
+
+// 題目——填空/選擇/配對/是非共用同一張表，用 questionType 分辨，answerData
+// 存 JSON 字串，格式依題型而不同（例如填空題就是答案文字本身；選擇題是
+// { options: [...], correctIndex }；配對題是 pairs 陣列；是非題是 "true"/
+// "false"）。SQLite 不支援 Json 型別，所以用字串存，跟專案裡其他地方
+// （例如 lib/jsonFields.ts）同樣的做法。
+model ChineseQuestion {
+  id            String      @id @default(cuid())
+  pageId        String
+  page          ChinesePage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  questionType  String // "fill_blank" | "multiple_choice" | "matching" | "true_false"
+  promptZh      String      @default("") // 填空題：完整中文句子（含要挖空的詞）；選擇題：題目文字
+  promptEn      String      @default("")
+  // answerData 存一段 JSON 字串，內容依題型而定：
+  // - fill_blank: {"blank":"感冒","acceptableAnswers":["著涼"]}
+  // - multiple_choice: {"options":["保健室","診所","教室"],"correctAnswer":"保健室"}
+  // 前台（ChineseStageFlowContent.tsx）會各自解析。這樣設計比另外開欄位
+  // 存選項/多重答案更簡單，也不用每加一種題型就改一次資料庫結構。
+  answerData    String      @default("")
+  hintZh        String      @default("")
+  hintEn        String      @default("")
+  explanationZh String      @default("")
+  explanationEn String      @default("")
+  order         Int         @default(0)
+  isPublished   Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 台灣行事曆（對應 lib/data/mockCalendar.ts）
+//
+// isOfficial=true 的資料表示來自官方行事曆來源（見 seed 腳本），管理後台在
+// Phase 3 會限制：官方資料只能編輯備註類欄位（tag/tips），不能任意竄改
+// isHoliday / date / source 等核心事實欄位；只有 isOfficial=false（管理員
+// 自行新增的一般提醒）可以完全自由編輯與刪除。這是規格書「不要讓管理員任意
+// 輸入沒有來源的官方節日資訊」的落地方式。
+// ─────────────────────────────────────────────────────────────────────────
+
+model CalendarEvent {
+  id           String   @id @default(cuid())
+  date         String // ISO date, yyyy-mm-dd
+  nameZh       String
+  nameEn       String
+  isHoliday    Boolean
+  isMakeup     Boolean  @default(false)
+  descriptionZh String
+  descriptionEn String
+  originZh     String?
+  originEn     String?
+  // taiwanCustoms 原本是 Json，SQLite 不支援 Json 型別，改用 String 儲存
+  // JSON.stringify 過的文字，讀寫時由 lib/jsonFields.ts 做 parse/stringify。
+  // 內容仍然是：[{ "zh-TW": "...", "en": "..." }, ...]
+  taiwanCustoms String?
+  sourceZh     String?
+  sourceEn     String?
+  noteZh       String? // 特殊備註（管理員自行輸入的提醒，例如「這天學校另有活動」）
+  noteEn       String?
+  enSource     String? // { nameEn, descriptionEn, originEn, noteEn: "AUTO"|"MANUAL"|"PENDING" }（source/tag 故意不自動翻譯，不記錄在這裡）
+  tagZh        String?
+  tagEn        String?
+  isAnchor     Boolean  @default(false)
+  groupLabelZh String?
+  groupLabelEn String?
+  isOfficial   Boolean  @default(true) // true = 官方來源鎖定資料，見上方說明
+  isPublished  Boolean  @default(true)
+  // 節日小圖（彈出視窗標題右側顯示）。存站內網址 /uploads/content/<UUID>.<副檔名>，
+  // 實際檔案在固定資料夾的 uploads。可為空：空代表不顯示圖片。只新增這一個可為空的欄位。
+  imageUrl     String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// IP 角色圖鑑（/ip-characters 頁面用；首頁 Hero 的 3 隻固定角色維持原本
+// lib/data/heroCharacters.ts 寫死方式，不進資料庫 — 原因見對話說明）
+// ─────────────────────────────────────────────────────────────────────────
+
+model IpCharacter {
+  id        String   @id @default(cuid())
+  name      String
+  image     String // 角色圖片／身分證正面照（兩處共用同一張圖，管理員只需要傳一次）
+  introZh   String // 身分證背面「背景」故事
+  introEn   String
+  // 身分證正面的欄位——定位／個性／一句話，都是中英文分開存，沒有自動翻譯，
+  // 管理員自己填，留空時畫面上不會出現「undefined」，直接不顯示那一行。
+  positionZh    String  @default("")
+  positionEn    String  @default("")
+  personalityZh String  @default("")
+  personalityEn String  @default("")
+  quoteZh       String  @default("")
+  quoteEn       String  @default("")
+  // 設計理念標題（例如「生活與陪伴」）——「設計理念內容」直接沿用上面的
+  // introZh/introEn（原本是「背景故事」），意思相近，不重複建欄位。
+  conceptTitleZh String @default("")
+  conceptTitleEn String @default("")
+  // 身分證背面的「卡牌圖」——跟 image（正面人物照）是不同的圖片。backImageWidth/
+  // Height 存原始圖片的實際像素寬高，前端用這兩個數字算 aspect-ratio，圖片
+  // 才能維持原始比例顯示（object-fit: contain），不會被強制拉伸或裁切。
+  backImage       String?
+  backImageWidth  Int?
+  backImageHeight Int?
+  // 這四個顏色是從這隻角色自己的卡牌圖片裡萃取出來的——每隻角色都用自己
+  // 這一套，不共用、不寫死。bgColor 是卡牌底色的淺色版，borderColor 是卡牌
+  // 裡最深的代表色，textColor/accentColor 從同一套色彩延伸。
+  bgColor     String  @default("#FFFFFF")
+  borderColor String  @default("#2D6A6A")
+  textColor   String  @default("#1B1B1B")
+  accentColor String  @default("#FF6F3C")
+  // 首頁點擊角色跳出的對話框——跟身分卡的 quoteZh/quoteEn（卡片上那句話）
+  // 是不同用途，分開存，才能讓管理員各自獨立編輯。
+  dialogueZh      String  @default("")
+  dialogueEn      String  @default("")
+  dialogueEnabled Boolean @default(true)
+  // 首頁 Hero 固定有 3 個角色位置（圖片本身寫死在 lib/data/heroCharacters.ts，
+  // 跟這張表完全是不同的圖片素材）。這個欄位讓管理員明確指定「這筆 IP 資料
+  // 要連去首頁哪一個位置」，前台查資料一律用這個欄位 + 這筆資料自己的
+  // id，不再用「第幾筆」或「名字剛好叫 a/b/c」這種容易對錯的猜測方式。
+  // 同一時間最多一筆資料可以對應到某個位置（由後台 API 保證）。
+  homePosition String? // "characterA" | "characterB" | "characterC" | null（不連結首頁）
+  dialogueLines IpDialogueLine[]
+  enSource  String? // { introEn, positionEn, personalityEn, quoteEn: "AUTO"|"MANUAL"|"PENDING" }
+  order     Int      @default(0)
+  isVisible Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// 一隻 IP 可以有好幾句點擊回覆，每次點擊從「這隻 IP 自己、啟用中」的這些
+// 句子裡隨機抽一句——用 characterId 外鍵綁定，不會抽到別隻 IP 的句子。
+model IpDialogueLine {
+  id          String      @id @default(cuid())
+  characterId String
+  character   IpCharacter @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  textZh      String
+  textEn      String  @default("")
+  order       Int     @default(0)
+  isEnabled   Boolean @default(true)
+  createdAt   DateTime @default(now())
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 網站基本設定（單一列 singleton，key 固定為 "default"）
+// ─────────────────────────────────────────────────────────────────────────
+
+model SiteSetting {
+  id        String   @id @default("default")
+  siteNameZh String  @default("異鄉座標")
+  siteNameEn String  @default("Exchange Compass")
+  subtitleZh String  @default("")
+  subtitleEn String  @default("")
+
+  // ── 首頁可編輯文字（/admin/appearance 或首頁管理）───────────────────────
+  // subtitleZh/En 沿用來當「首頁副標題」（Hero 區塊那段介紹文字）。
+  // heroTitleZh/En 是首頁最大那行標題。popularTitle/popularSubtitle 是
+  // 「熱門 × 行事曆」那個區塊的標題／說明。這三組都預設空字串，畫面上留空
+  // 時 fallback 用原本的文字（不會出現空白），管理員填了才會取代。
+  heroTitleZh    String @default("")
+  heroTitleEn    String @default("")
+  popularTitleZh String @default("")
+  popularTitleEn String @default("")
+  popularSubtitleZh String @default("")
+  popularSubtitleEn String @default("")
+  contactInfo String @default("")
+
+  // ── 網站外觀（/admin/appearance）───────────────────────────────────────
+  // 專案已經有這張 SiteSetting singleton 表了，網站外觀的顏色／圖片設定直接
+  // 擴充在這張表上，不另外建立第二張重複的設定表（siteNameZh/siteNameEn/
+  // subtitleZh/subtitleEn 本來就是「網站標題／副標題」，網站外觀要的
+  // siteTitle/siteSubtitle 就是同一件事，不重複加欄位）。
+  //
+  // 目前「主色／輔助色／背景色／文字色」這四個有實際接上前台（透過
+  // app/globals.css 的 CSS 變數 + app/layout.tsx 的 ThemeStyleInjector，全站
+  // 共用既有的 Tailwind class，不用改任何元件）。「卡片背景色／按鈕色／
+  // 導覽列色／頁尾色」這四個目前存起來、後台可以編輯，但還沒有獨立於前四色
+  // 之外的顯示效果——這是老實的現況說明，不是藏起來的限制。
+  primaryColor    String  @default("#2D6A6A")
+  secondaryColor  String  @default("#FF6F3C")
+  backgroundColor String  @default("#FAFAF7")
+  textColor       String  @default("#1B1B1B")
+  cardColor       String  @default("#FFFFFF")
+  buttonColor     String  @default("#FF6F3C")
+  navbarColor     String  @default("#FAFAF7")
+  footerColor     String  @default("#1B1B1B")
+
+  // 圖片只存路徑／URL，不存二進位資料——一樣透過現有的 lib/uploadImage.ts
+  // 上傳機制，存在 /public/uploads/content/。
+  logoUrl           String?
+  homeHeroUrl       String?
+  homeBackgroundUrl String?
+  homeDecorationUrl String?
+  ipCharacter1Url   String?
+  ipCharacter2Url   String?
+  ipCharacter3Url   String?
+  footerText        String  @default("")
+
+  // ── 演習提醒（首頁「行事曆自動算出來的公告」裡，唯一一段原本完全沒有
+  //    資料庫來源的文字，之前寫死在 lib/data/drillNotice.ts）──────────────
+  // 假期／紀念日提醒的文字其實已經是從 CalendarEvent 的 name/description
+  // 抓出來的（見 lib/announcementGenerator.ts），管理員到「台灣行事曆管理」
+  // 編輯對應節日就能改到；只有演習提醒完全獨立、管理員之前無論如何都改不到，
+  // 現在搬進這裡，/admin/announcements 可以直接編輯。
+  drillTitleZh      String  @default("演習提醒")
+  drillTitleEn      String  @default("Drill Reminder")
+  drillBodyZh       String  @default("")
+  drillBodyEn       String  @default("")
+  drillGeneralBodyZh String @default("")
+  drillGeneralBodyEn String @default("")
+  drillStart        String  @default("")
+  drillEnd          String  @default("")
+
+  updatedAt DateTime @updatedAt
+}
+
+// 「關於我們」頁面（/about）最上方的理念說明——單一列（id 固定 "default"），
+// 跟 SiteSetting 一樣是 singleton。頁面上其餘的團隊成員／合作單位／隱私權／
+// 服務條款維持原本寫死的方式，不是這次要求管理的範圍（欄位結構是簡單的
+// 標題+內容一對，放不下團隊/合作單位那種列表資料）。
+model AboutContent {
+  id        String   @id @default("default")
+  titleZh   String   @default("")
+  titleEn   String   @default("")
+  contentZh String   @default("")
+  contentEn String   @default("")
+  enSource  String? // { titleEn, contentEn: "AUTO"|"MANUAL"|"PENDING" }
+  // 聯絡我們——原本固定寫在前端，這次接上後台。socialLinksJson 存一段 JSON
+  // 陣列 [{label, url}]，社群連結數量不固定，用陣列比開一堆欄位有彈性。
+  contactTitleZh  String  @default("")
+  contactTitleEn  String  @default("")
+  contactBodyZh   String  @default("")
+  contactBodyEn   String  @default("")
+  email           String  @default("")
+  phone           String  @default("")
+  address         String  @default("")
+  socialLinksJson String? // [{ "label": "Instagram", "url": "https://..." }]
+  updatedAt DateTime @updatedAt
+}
+
+// 網站理念的「段落」——titleZh/contentZh 等於上面 AboutContent 的 title/content
+// 是第一段（一直都有，位置固定在最前面），這裡是管理員可以自由新增/刪除/
+// 排序的「額外段落」。拆成列表而不是塞進 AboutContent 單一欄位，才能真的
+// 做到「新增段落、刪除段落、調整順序」。
+model AboutSection {
+  id        String   @id @default(cuid())
+  titleZh   String   @default("")
+  titleEn   String   @default("")
+  contentZh String   @default("")
+  contentEn String   @default("")
+  order     Int      @default(0)
+  isVisible Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  nameZh    String
+  nameEn    String   @default("")
+  roleZh    String   @default("") // 職稱／負責內容
+  roleEn    String   @default("")
+  bioZh     String   @default("")
+  bioEn     String   @default("")
+  photo     String?
+  order     Int      @default(0)
+  isVisible Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Partner {
+  id            String   @id @default(cuid())
+  nameZh        String
+  nameEn        String   @default("")
+  descriptionZh String   @default("")
+  descriptionEn String   @default("")
+  logo          String?
+  websiteUrl    String   @default("")
+  order         Int      @default(0)
+  isVisible     Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 手機版首頁管理（/admin/mobile）——首頁 Hero 的 3 隻角色圖片本身仍然維持
+// lib/data/heroCharacters.ts 寫死的方式（原因見之前對話：版面已調校過，避免
+// 破壞），這裡存的只是「手機版怎麼呈現這 3 隻角色＋哪些手機首頁區塊要顯示」
+// 這些簡報設定，不是角色本身的資料。
+// ─────────────────────────────────────────────────────────────────────────
+
+// 手機首頁各區塊是否顯示（單一列 singleton，id 固定 "default"）
+model MobileHomeSetting {
+  id                String   @id @default("default")
+  showQuickLinks    Boolean  @default(true) // 校園座標／生活座標／中文學習 快速連結卡片
+  showIpRow         Boolean  @default(true) // 3 隻角色橫向排列區塊
+  showAnnouncements Boolean  @default(true) // 重要公告輪播
+  updatedAt         DateTime @updatedAt
+}
+
+// 手機首頁 3 隻角色個別的呈現設定。id 固定是 "characterA"/"characterB"/
+// "characterC"，對應 lib/data/heroCharacters.ts 的三個 key。
+// 「位置」用 order（在橫向排列中的順序：左中右）表示，不是絕對座標——手機版
+// 本來就是 flex 三欄排列，用順序決定左右位置最合理，也符合「不要用絕對座標」
+// 的要求。
+model MobileIpCharacterSetting {
+  id                 String   @id // "characterA" | "characterB" | "characterC"
+  isVisible          Boolean  @default(true)
+  order              Int      @default(0) // 排列順序（由小到大＝由左到右）
+  sizeScale          Float    @default(1.0) // 在預設 clamp() 大小上再乘一個倍率，管理員可以微調
+  animationEnabled   Boolean  @default(true)
+  animationAmplitude Int      @default(10) // 上下浮動幅度（px）
+  animationDuration  Float    @default(3.0) // 浮動一個週期的秒數，數字越小動越快
+  updatedAt          DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 學生照片投稿（前台 /photo-submit，舊網址 /upload 會導向這裡）
+// ─────────────────────────────────────────────────────────────────────────
+
+// SQLite 不支援 Prisma 的 enum 型別，status 改用 String，實際只會是
+// "pending" | "approved" | "rejected" 這三個值之一，由
+// app/api/admin/uploads/[id]/route.ts 與 app/api/uploads/route.ts 控制，
+// 不會有第四種值出現。
+//
+// title 用 @default(...) 而不是單純必填、不給預設值，是因為資料庫裡可能
+// 已經有「新增 title 欄位之前」留下的舊投稿資料——用 @default 讓這次新增
+// 欄位不需要刪除或重建現有資料表，也不會在 `prisma migrate dev` 執行時卡在
+// 互動式提示（不 reset database，不刪除現有資料）。
+model PhotoSubmission {
+  id              String    @id @default(cuid())
+  driveFileId     String? // Google Drive 檔案 ID（approved 後才會有）
+  previewUrl      String? // 儲存路徑（審核用；approve 後可改指向 Drive 直連連結）
+  title           String    @default("未命名投稿") // 照片名稱（前台投稿表單必填，中文）
+  titleEn         String    @default("Untitled Submission") // 自動翻譯或管理員手動輸入
+  nickname        String? // 投稿者暱稱（選填，跟 title 是不同欄位）
+  caption         String? // 照片說明（選填，中文）
+  captionEn       String? // 自動翻譯或管理員手動輸入
+  enSource        String? // { titleEn, captionEn: "AUTO"|"MANUAL"|"PENDING" }——目前投稿沒有英文輸入欄位，永遠是 AUTO/PENDING
+  category        String? // 對應校園座標/生活座標等分類 —— 前台投稿時不會問，
+  // 只有管理員審核時可以視需要另外分類，所以維持選填。
+  status          String    @default("pending") // "pending" | "approved" | "rejected"
+  createdAt       DateTime  @default(now())
+  reviewedAt      DateTime?
+  reviewerId      String? // 審核管理員的 Admin.id（如果當時有登入紀錄）
+  rejectionReason String? // 駁回原因分類（例如「色情／裸露內容」，見預設清單）
+  rejectionNote   String? // 管理員補充備註（選填，自由文字）
+  comments        Comment[]
+}
+
+// 照片牆留言（照片詳細頁 /photo-submit/[id] 底下的留言區）。
+// 不需要登入就能留言；用 isDeleted 做軟刪除（soft delete）——管理員刪除留言
+// 時只是標記隱藏，不會真的從資料庫移除，保留紀錄方便之後查證，公開頁面只顯示
+// isDeleted = false 的留言。
+model Comment {
+  id        String          @id @default(cuid())
+  photoId   String
+  photo     PhotoSubmission @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  nickname  String
+  content   String
+  isDeleted Boolean         @default(false)
+  createdAt DateTime        @default(now())
+}
+
+// 官方網站圖片庫（/admin/images 的「官方圖片庫」區）—— 跟上面的使用者投稿
+// 是兩個完全獨立的資料表。公開網站目前不會直接讀這張表（校園座標/生活座標/
+// IP角色等各自的 image 欄位仍然各自存自己的圖片路徑，不受影響），這張表是
+// 給管理員的「站方素材庫」集中管理清單，方便瀏覽、替換、停用。
+model OfficialImage {
+  id        String   @id @default(cuid())
+  url       String // 儲存路徑，例如 /uploads/content/xxxx.jpg
+  title     String
+  category  String   @default("other") // home | campus | life | chinese | calendar | characters | about | other
+  usage     String? // 使用位置說明（例如「首頁 Hero」、「校園座標－升旗卡片」）
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 威洛 AI 助理（前台右下角漂浮角色）
+// 純新增兩張表，不動任何既有資料表。沒有資料列時，前台與 API 會自動使用
+// lib/ai/defaults.ts 的預設值；管理員第一次打開 /admin/assistant 時才會寫入。
+// ─────────────────────────────────────────────────────────────────────────
+
+// 單例（id 固定 "default"）：基本設定 + 外觀設定。
+model AssistantSetting {
+  id String @id @default("default")
+
+  // 基本
+  enabled         Boolean @default(true)
+  nameZh          String  @default("威洛")
+  nameEn          String  @default("Willow")
+  welcomeZh       String  @default("你好！我是威洛，很高興認識你！有什麼關於台灣校園或生活的問題，都可以問問我喔！")
+  welcomeEn       String  @default("Hi! I’m Willow. It’s nice to meet you! Feel free to ask me anything about school life or daily life in Taiwan!")
+  fallbackZh      String  @default("嗯……這個問題我目前還在學習中！你可以換個方式問問我，或到網站上的相關區域看看喔！")
+  fallbackEn      String  @default("Hmm… I’m still learning about that one! Try asking in a different way, or look around the related sections of the website!")
+  defaultLang     String  @default("zh-TW") // "zh-TW" | "en"
+  allowLangSwitch Boolean @default(true)
+  showName        Boolean @default(true)
+  showTyping      Boolean @default(true)
+  keepHistory     Boolean @default(true)
+
+  // 外觀
+  imageUrl      String  @default("") // 空字串＝沿用首頁威洛（heroCharacters.characterB）
+  // 動作圖片（空字串＝使用內建預設；沒有內建就退回上面的待機圖）。只新增這三個有預設值的欄位。
+  thinkingImageUrl   String @default("")
+  unresolvedImageUrl String @default("")
+  lifeInfoImageUrl   String @default("")
+  sizeDesktop   Int     @default(140)
+  sizeMobile    Int     @default(88)
+  position      String  @default("bottom-right") // bottom-right | bottom-left | top-right | top-left
+  edgeDistance  Int     @default(24)
+  panelWidth    Int     @default(360)
+  panelHeight   Int     @default(480)
+  panelRadius   Int     @default(16)
+  primaryColor  String  @default("#84bed7")
+  secondaryColor String @default("#2a6ea2")
+  bgColor       String  @default("#ffffff")
+  textColor     String  @default("#1f2937")
+  buttonStyle   String  @default("round") // round | square | pill
+  showShadow    Boolean @default(true)
+  allowDrag     Boolean @default(true)
+  showLangButton Boolean @default(true)
+
+  updatedAt DateTime @updatedAt
+}
+
+// 假 AI 關鍵字規則。priority 數字越小越先比對；第一個命中的規則勝出。
+// keywords 是用換行或逗號分隔的字串（中英文關鍵字可混在一起）。
+model AssistantRule {
+  id       String  @id @default(cuid())
+  keywords String  @default("")
+  replyZh  String  @default("")
+  replyEn  String  @default("")
+  enabled  Boolean @default(true)
+  priority Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 威洛「問題求助」：使用者投稿的問題（原始資料，未審核）與管理員核准的正式知識。
+// 兩張表完全分開：投稿永遠不會被搜尋；只有 status="approved" 且 isActive=true 的知識才會被威洛搜尋。
+// 只新增這兩張資料表，不修改任何既有資料表。
+// ─────────────────────────────────────────────────────────────────────────
+
+model AssistantQuestion {
+  id               String   @id @default(cuid())
+  clientKey        String   @unique // 前端每次打開表單產生一個，防止重複點擊／網路重試重複建立
+  question         String // 使用者原始問題（不會被管理員編輯覆蓋）
+  category         String   @default("") // "" | life | campus | transport | chinese | culture | other
+  note             String   @default("") // 補充說明
+  lang             String   @default("zh-TW")
+  contextQuestion  String   @default("") // 從某次回覆提交時，當次的提問
+  contextCandidates String  @default("") // JSON 字串：威洛當時提供的候選項目 [{ title, category }]
+  status           String   @default("pending") // pending | organizing | knowledge_created | rejected
+  standardQuestion String   @default("") // 管理員整理後的標準問法
+  adminNote        String   @default("") // 管理員內部備註（不會回傳給一般使用者）
+  knowledge        AssistantKnowledge?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([status, createdAt])
+}
+
+model AssistantKnowledge {
+  id               String             @id @default(cuid())
+  questionId       String?            @unique
+  question         AssistantQuestion? @relation(fields: [questionId], references: [id], onDelete: SetNull)
+  standardQuestion String // 標準問題
+  questionEn       String             @default("")
+  answerZh         String             @default("") // 正式答案
+  answerEn         String             @default("")
+  synonyms         String             @default("") // 同義問法／相關搜尋詞（換行或逗號分隔，選填）
+  category         String             @default("other") // life | campus | transport | chinese | culture | other
+  sourceUrl        String             @default("") // 選填：站內路徑（/life/bus）或 https 連結
+  status           String             @default("draft") // draft | approved
+  isActive         Boolean            @default(false) // 停用後立刻不再被搜尋
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 【已停用，保留以免 db:push 要求刪表】舊版「全站共用」答題正確動畫設定。現在改為每一關各自設定（見 ChineseStageAnimation），程式不再讀寫這張表。
+// （原說明）單筆，id 固定 "default"。動畫檔案本身存在固定資料夾 uploads/chinese-animation/，
+// 這裡只記錄「用哪一個檔案」。mode：default＝沿用內建動畫（原本行為）、custom＝使用上傳的動畫、none＝不播動畫（只有文字回饋）。
+// ─────────────────────────────────────────────────────────────────────────
+model ChineseCorrectAnimation {
+  id        String   @id @default("default")
+  mode      String   @default("default") // default | custom | none
+  fileUrl   String   @default("") // /uploads/chinese-animation/<uuid>.<ext>
+  fileName  String   @default("") // 管理員上傳時的原始檔名（只用來顯示）
+  format    String   @default("") // mp4 | gif | svg
+  mimeType  String   @default("")
+  sizeBytes Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 中文學習「每一關」的答題成功動畫。以穩定的關卡 ID（ChineseStage.id）關聯，
+// 不是關卡編號或名稱，所以調整順序／改名都不會對錯關卡。一關最多一筆；沒有資料列＝這一關沒有動畫（只顯示文字回饋）。
+// 動畫檔案存在固定資料夾 uploads/chinese-animation/，這裡只記錄檔案網址與資訊。
+// 沒有設外鍵：這張表單獨新增，不改動 ChineseStage；刪除關卡時由刪除 API 順手清理。
+// ─────────────────────────────────────────────────────────────────────────
+model ChineseStageAnimation {
+  stageId   String   @id
+  fileUrl   String   @default("") // /uploads/chinese-animation/<uuid>.<ext>
+  fileName  String   @default("") // 原始檔名（只用來顯示）
+  format    String   @default("") // mp4 | gif | svg
+  mimeType  String   @default("")
+  sizeBytes Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 首頁裝飾圖樣（透明底 PNG，疊在首頁底色之上、首頁內容之下）。新增的獨立資料表，不改動既有資料表。
+// 圖片本身存在固定資料夾 uploads/home-decor/；這裡只記錄網址與顯示設定。
+// desktopJson / mobileJson：桌面版與手機版各自的 { visible, anchor, x, y, size, rotate, opacity }，讀取時一律經過驗證。
+// area：hero（最上方橫幅區）或 body（橫幅下方、直接在首頁底色上）。
+// ─────────────────────────────────────────────────────────────────────────
+model HomeDecoration {
+  id           String   @id @default(cuid())
+  name         String   @default("")
+  imageUrl     String   @default("")
+  naturalWidth Int      @default(0)
+  naturalHeight Int     @default(0)
+  isVisible    Boolean  @default(true)
+  area         String   @default("body") // hero | body
+  sortOrder    Int      @default(0)
+  desktopJson  String   @default("{}")
+  mobileJson   String   @default("{}")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 首頁 IP 角色版面（桌機／平板／手機各自獨立儲存）
+// id："characterA"（布迪）｜"characterB"（威洛）｜"characterC"（帕菲）——首頁三個固定位置。
+// 每個裝置一欄 JSON：{ visible, x, y, size, rotate, flip }（座標是相對主視覺區的百分比，格式見 lib/home/ipLayout.ts）。
+// 欄位為 NULL＝管理員還沒儲存過這個裝置，前台使用該裝置自己的預設值。
+// 純新增資料表，不影響任何既有資料；角色圖片仍存在 SiteSetting.ipCharacter1Url～3Url（沿用既有欄位）。
+// ─────────────────────────────────────────────────────────────────────────
+model IpHeroLayout {
+  id          String   @id
+  desktopJson String?
+  tabletJson  String?
+  mobileJson  String?
+  updatedAt   DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 威洛「問題類型與角色狀態」（新增資料表，不動既有資料）。
+// 判斷沿用既有搜尋流程：signals＝流程產生的訊號（主題 topic:*、命中資料來源 source:*、找不到答案 fallback），
+// keywords＝輔助關鍵字（只有在流程「已找到答案」時才會參與比對，不會單靠一個字強制切換）。
+// 內建狀態 idle / thinking / life_info / unresolved 仍用 AssistantSetting 的圖片欄位，是系統必要狀態，不在這張表。
+// ─────────────────────────────────────────────────────────────────────────
+model AssistantQuestionType {
+  id        String   @id @default(cuid())
+  key       String   @unique // 穩定代碼（建立後不變）
+  nameZh    String
+  nameEn    String   @default("")
+  labelZh   String   @default("") // 簡短狀態文字（顯示在威洛旁）
+  labelEn   String   @default("")
+  signals   String   @default("") // 逗號分隔，例：topic:transport,source:life
+  keywords  String   @default("") // 輔助關鍵字（換行或逗號分隔）
+  imageUrl  String   @default("") // 角色外觀圖片或動畫（空＝沿用內建狀態圖）
+  enabled   Boolean  @default(true)
+  priority  Int      @default(100)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 重要公告的「文字連結」（新增資料表，不動既有的 Announcement 資料表與資料）。
+// 一則公告一列：show＝是否顯示連結區；linksJson＝連結陣列（由 lib/announcementLinks.ts 驗證）。
+// ─────────────────────────────────────────────────────────────────────────
+model AnnouncementLinkSet {
+  announcementId String   @id
+  show           Boolean  @default(true)
+  linksJson      String   @default("[]")
+  updatedAt      DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 校園座標「大分類」（新增資料表）。CampusSpot.category 存的就是這張表的 id；既有的兩個分類沿用原本的值：
+// culture（校園文化 Q&A）與 school_units（學校單位），所以現有校園資料不需要任何轉換。
+// 資料表是空的時，程式會把這兩個預設分類當成現有分類使用；第一次在後台新增分類時才補寫入（只補缺、不覆蓋）。
+// ─────────────────────────────────────────────────────────────────────────
+model CampusCategory {
+  id            String   @id
+  nameZh        String
+  nameEn        String   @default("")
+  descriptionZh String   @default("")
+  descriptionEn String   @default("")
+  enSource      String?
+  order         Int      @default(0)
+  isPublished   Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 資訊框的「自由定位裝飾圖片」（新增資料表；生活座標項目與校園座標項目共用）。
+// 位置／大小都是相對於資訊框本身的百分比；圖片永遠在文字下方、不攔截滑鼠，不會讓資訊框變高。
+// ─────────────────────────────────────────────────────────────────────────
+model InfoBoxImage {
+  id            String   @id @default(cuid())
+  scope         String // "campus" | "life"
+  boxId         String // CampusSpot.id 或 LifeItem.id
+  imageUrl      String
+  x             Float    @default(88) // 0–100（%，錨點式：0 貼左緣、100 貼右緣）
+  y             Float    @default(12) // 0–100
+  size          Float    @default(22) // 寬度，佔資訊框寬度的 %
+  rotate        Int      @default(0) // -180–180
+  opacity       Int      @default(100) // 20–100
+  mobileScale   Int      @default(80) // 手機版縮放（%）
+  mobileVisible Boolean  @default(true)
+  visible       Boolean  @default(true)
+  order         Int      @default(0) // 前後順序：數字大的在上面（但都在文字下方）
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([scope, boxId])
+}

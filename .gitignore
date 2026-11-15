@@ -1,0 +1,46 @@
+# dependencies
+/node_modules
+
+# next.js build output
+/.next/
+/out/
+
+# env files — 真正的密鑰只放在你本機或部署平台的環境變數，不進版控
+.env
+.env*.local
+
+# 本機開發用 SQLite 資料庫檔案
+/prisma/dev.db
+/prisma/dev.db-journal
+
+# 管理員/學生上傳的實際圖片檔案（正式環境會用真正的雲端儲存，這裡只保留資料夾結構）
+/public/uploads/content/*
+/public/uploads/submissions/*
+!/public/uploads/content/.gitkeep
+!/public/uploads/submissions/.gitkeep
+
+# misc
+.DS_Store
+*.log
+npm-debug.log*
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# ===== 南得遇見你：正式上線安全保護 =====
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# 本機 SQLite 資料庫
+/prisma/*.db
+/prisma/*.db-journal
+/prisma/*.db-wal
+/prisma/*.db-shm
+
+# 本機備份、報告及 Vercel 設定
+/backups/
+/reports/
+/.vercel/

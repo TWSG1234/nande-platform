@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* 網站外觀（/admin/appearance）可調整的顏色，用 CSS 變數存，這樣後台改了
+       之後不用重新編譯，前台任何用到 transit-500／lantern-500／canvas-light／
+       ink-900 這幾個既有 class 的地方都會自動套用新顏色，不用逐一修改元件。
+       數值是 R G B 三個數字（不含逗號），格式配合 tailwind.config.ts 的
+       rgb(var(--x) / <alpha-value>) 寫法，才能讓 bg-transit-500/10 這種透明度
+       用法繼續正常運作。下面是目前設計的預設值（還沒有人在後台改過的狀態）。 */
+    --color-primary: 132 190 215; /* #84bed7 */
+    --color-secondary: 42 110 162; /* #2a6ea2 */
+    --color-bg-light: 250 250 247; /* canvas.light #FAFAF7 */
+    --color-text: 27 27 27; /* ink-900 #1B1B1B */
+    --color-card: 255 255 255; /* 卡片背景色，預設白色 #FFFFFF */
+    --color-navbar: 250 250 247; /* 導覽列色，預設跟背景色一樣 #FAFAF7 */
+    --color-footer: 255 255 255; /* 頁尾色 #FFFFFF */
+    --color-annotation: 42 110 162; /* 特別註釋文字顏色 #2a6ea2 */
+  }
+}
+
+@layer base {
+  * {
+    @apply border-ink-100;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+  :focus-visible {
+    outline: 2px solid theme("colors.lantern.500");
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  ::selection {
+    background-color: theme("colors.lantern.200");
+  }
+}
+
+@layer utilities {
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
