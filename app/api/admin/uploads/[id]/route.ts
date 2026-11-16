@@ -3,6 +3,7 @@ import { requireAdmin } from "@/lib/requireAdmin";
 import { prisma } from "@/lib/prisma";
 import { isDriveConfigured, uploadBufferToDrive } from "@/lib/driveService";
 import { deleteLocalImage, readStoredImage } from "@/lib/uploadImage";
+import { DriveError, describeError } from "@/lib/googleDriveOAuth";
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
   const session = await requireAdmin();
@@ -67,9 +68,14 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       });
       return NextResponse.json({ submission: updated });
     } catch (err) {
-      console.error(err);
+      // 不直接 console.error(err)：Google 錯誤物件含 request 設定，可能帶 token／secret。
+      console.error("[drive-approve]", describeError(err));
+      if (err instanceof DriveError) {
+        const status = err.code === "DRIVE_UPLOAD_FAILED" ? 502 : 409;
+        return NextResponse.json({ error: err.message, code: err.code }, { status });
+      }
       return NextResponse.json(
-        { error: "上傳到 Google Drive 時發生問題，請稍後再試一次，或檢查 Google Drive 設定。" },
+        { error: "上傳到 Google Drive 時發生問題，請稍後再試一次，或檢查 Google Drive 設定。", code: "DRIVE_UPLOAD_FAILED" },
         { status: 500 }
       );
     }

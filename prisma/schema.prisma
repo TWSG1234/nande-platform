@@ -895,3 +895,20 @@ model InfoBoxImage {
 
   @@index([scope, boxId])
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Google Drive 個人 Gmail OAuth 授權（新增資料表；只有一列 id="default"）。
+// 只存「加密後」的 Refresh Token（AES-256-GCM，金鑰在環境變數 GOOGLE_TOKEN_ENCRYPTION_KEY），
+// 資料庫與備份檔外洩也無法直接還原 token。Access Token 不存，每次用 Refresh Token 換新。
+// ─────────────────────────────────────────────────────────────────────────
+model GoogleDriveAuth {
+  id                 String   @id @default("default")
+  refreshTokenEnc    String // 加密後的 Refresh Token（格式 v1:iv.tag.密文）
+  accountEmail       String // 授權的 Gmail（顯示用）
+  scope              String // 實際取得的 scope
+  status             String   @default("active") // "active" | "revoked"
+  lastError          String? // 最近一次授權錯誤的辨識碼（不含任何 token）
+  connectedByAdminId String? // 按下授權的 Admin.id
+  connectedAt        DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}

@@ -42,7 +42,8 @@
     "db:migrate-to-pg": "tsx prisma/tools/pgMigrate.ts",
     "test:pgmigrate": "tsx tests/pgmigrate/run.ts",
     "test:pgreader": "tsx tests/pgmigrate/reader.ts",
-    "test:schema": "tsx tests/schema/run.ts"
+    "test:schema": "tsx tests/schema/run.ts",
+    "test:driveoauth": "tsx tests/driveoauth/run.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

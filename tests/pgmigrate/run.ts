@@ -138,8 +138,8 @@ const recorder = (c: any): PgLike & { log: string[] } => { const log: string[] =
     assert.ok(r1.createdAt instanceof Date && (r1.createdAt as Date).getTime() === 1780000000123); assert.ok(r2.createdAt instanceof Date);
     const withBool = byName.get("Announcement")!; assert.equal(fromSqliteRaw(withBool, { isPublished: 0 }).isPublished, false);
   });
-  await t("外鍵順序：36 張表父表在前", () => {
-    const o = insertOrder(schema); assert.equal(o.length, 36); const pos = new Map(o.map((m, i) => [m.name, i]));
+  await t("外鍵順序：37 張表父表在前", () => {
+    const o = insertOrder(schema); assert.equal(o.length, 37); const pos = new Map(o.map((m, i) => [m.name, i]));
     for (const m of schema) for (const r of m.relations) assert.ok(pos.get(r.refModel)! < pos.get(m.name)!, `${r.refModel} 應在 ${m.name} 之前`);
   });
   await t("來源檢查：乾淨資料沒有阻擋；空字串／NULL／JSON 字串不是問題", () => {
@@ -179,7 +179,7 @@ const recorder = (c: any): PgLike & { log: string[] } => { const log: string[] =
     const rep = await runMigration({ schema, source, pg: null, args: A({ noNeon: true }) });
     const text = reportMarkdown(rep) + JSON.stringify(rep) + planCsv(rep);
     assert.ok(!text.includes("SECRETSECRET")); assert.ok(!text.includes("admin@example.test")); assert.ok(!/postgres(ql)?:\/\//.test(text)); assert.ok(!text.includes("換行"));
-    assert.equal(rep.sourceTotal, 72); assert.equal(rep.plan.length, 36); assert.equal(rep.outcome, "dry-run");
+    assert.equal(rep.sourceTotal, 74); assert.equal(rep.plan.length, 37); assert.equal(rep.outcome, "dry-run");
   });
   await t("程式碼靜態檢查：搬移工具不含 TRUNCATE／DELETE FROM／DROP／ALTER／db push／migrate reset／seed 等指令", () => {
     for (const f of ["prisma/tools/pgMigrateCore.ts", "prisma/tools/pgMigrate.ts"]) {
@@ -220,7 +220,7 @@ const recorder = (c: any): PgLike & { log: string[] } => { const log: string[] =
         await makePg(client); const s0 = await settled();
         const rec = recorder(client);
         const rep = await runMigration({ schema, source, pg: rec, args: A({ expectTotal: N }) });
-        assert.equal(rep.outcome, "dry-run"); assert.deepEqual(rep.refusals, []); assert.equal(rep.sourceTotal, 72); assert.ok(rep.targetChecked);
+        assert.equal(rep.outcome, "dry-run"); assert.deepEqual(rep.refusals, []); assert.equal(rep.sourceTotal, 74); assert.ok(rep.targetChecked);
         assert.deepEqual(rep.plan.map((p) => p.rows), insertOrder(schema).map((m) => source.get(m.name)!.length));
         assert.ok(rep.plan.every((p) => p.targetRows === 0));
         assert.ok(rec.log.every((q) => /^(BEGIN READ ONLY|ROLLBACK|SELECT)/.test(q.trim())), "乾跑只能有唯讀查詢");
@@ -273,7 +273,7 @@ const recorder = (c: any): PgLike & { log: string[] } => { const log: string[] =
         const rep2 = await runMigration({ schema, source, crossCheck: diff, pg: client, args: APPLY(N) }); assert.equal(rep2.outcome, "refused"); assert.ok(rep2.refusals.some((r) => /不一致/.test(r))); assert.equal(sumCounts(await counts(client)), 0);
       });
 
-      await t("寫入到一半出錯 → 整筆 ROLLBACK（36 張表仍是 0 筆）；修好後重跑成功（安全重試）", async () => {
+      await t("寫入到一半出錯 → 整筆 ROLLBACK（37 張表仍是 0 筆）；修好後重跑成功（安全重試）", async () => {
         await makePg(client);
         for (const stage of ["before-insert", "after-insert:LifeCategory", "after-insert:Comment", "after-insert:SiteSetting", "after-verify"]) {
           const rep = await runMigration({ schema, source, pg: client, args: APPLY(N), failAt: (s) => { if (s === stage) throw new Error("模擬錯誤 " + stage); } });

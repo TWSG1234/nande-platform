@@ -28,19 +28,4 @@ npm-debug.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# ===== 南得遇見你：正式上線安全保護 =====
-.env
-.env.*
-!.env.example
-!.env.*.example
-
-# 本機 SQLite 資料庫
-/prisma/*.db
-/prisma/*.db-journal
-/prisma/*.db-wal
-/prisma/*.db-shm
-
-# 本機備份、報告及 Vercel 設定
-/backups/
-/reports/
-/.vercel/
+.vercel

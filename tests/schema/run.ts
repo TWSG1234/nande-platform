@@ -31,9 +31,9 @@ const pick = (env: Record<string, string>, root = P) => { const r = run(GEN, ["-
 
 (async () => {
   // ───── A. Schema 一致性 ─────
-  await t("A1 目前兩份 schema：36 個 model 逐字一致，provider／binaryTargets／directUrl 正確", () => {
-    const r = compareSchemaFiles(P)!; assert.deepEqual(r.problems, []); assert.ok(r.ok); assert.equal(r.models, 36);
-    assert.equal(sqliteText.match(/^model /gm)!.length, 36); assert.equal(pgText.match(/^model /gm)!.length, 36);
+  await t("A1 目前兩份 schema：37 個 model 逐字一致，provider／binaryTargets／directUrl 正確", () => {
+    const r = compareSchemaFiles(P)!; assert.deepEqual(r.problems, []); assert.ok(r.ok); assert.equal(r.models, 37);
+    assert.equal(sqliteText.match(/^model /gm)!.length, 37); assert.equal(pgText.match(/^model /gm)!.length, 37);
   });
   await t("A2 偵測不一致：新增欄位／缺 model／多 model／改欄位型別／provider 錯／缺 rhel／缺 directUrl", () => {
     const bad = (f: (s: string) => string) => compareSchemaPair(sqliteText, f(pgText));

@@ -99,8 +99,8 @@ const ledgerOf = (urls: string[]): LedgerInfo => ({ verified: new Map(urls.map((
 const codes = (r: ReturnType<typeof analyze>, sev?: string) => r.findings.filter((f) => !sev || f.severity === sev).map((f) => f.code);
 
 (async () => {
-  await t("schema 解析：36 個 model、8 組外鍵、複合規則；JSON 欄位由註解判斷", () => {
-    assert.equal(schema.length, 36); assert.equal(schema.reduce((n, m) => n + m.relations.length, 0), 8);
+  await t("schema 解析：37 個 model、8 組外鍵、複合規則；JSON 欄位由註解判斷", () => {
+    assert.equal(schema.length, 37); assert.equal(schema.reduce((n, m) => n + m.relations.length, 0), 8);
     assert.deepEqual(byName.get("AnnouncementLinkSet")!.id, ["announcementId"]); assert.ok(byName.get("Admin")!.uniques.some((u) => u.join() === "email"));
     assert.ok(byName.get("ChinesePage")!.scalars.some((f) => f.name === "comicImages" && isJson(f)));
     assert.equal(byName.get("ChineseLevel")!.relations[0]!.onDelete, "Cascade"); assert.equal(byName.get("AssistantKnowledge")!.relations[0]!.onDelete, "SetNull");
@@ -112,11 +112,11 @@ const codes = (r: ReturnType<typeof analyze>, sev?: string) => r.findings.filter
 
   // ───── SQLite 側（不需要 PostgreSQL） ─────
   const clean = await sqliteSnap(await makeSqlite());
-  await t("SQLite 乾淨資料：完整性 ok、36 表各 1 筆、沒有資料異常；原始位元組不被改動", async () => {
+  await t("SQLite 乾淨資料：完整性 ok、37 表各 1 筆、沒有資料異常；原始位元組不被改動", async () => {
     const bytes = await makeSqlite(); const h = crypto.createHash("sha256").update(bytes).digest("hex"); await sqliteSnap(bytes); assert.equal(crypto.createHash("sha256").update(bytes).digest("hex"), h);
-    assert.deepEqual(clean.integrity, ["ok"]); assert.equal(clean.tables.size, 36);
+    assert.deepEqual(clean.integrity, ["ok"]); assert.equal(clean.tables.size, 37);
     const r = analyze({ schema, sqlite: clean, pg: null, ledger: ledgerOf([URL1]) });
-    assert.equal(r.sqliteTotal, 36); assert.deepEqual(codes(r, "blocking"), []); assert.deepEqual(codes(r, "warning"), []);
+    assert.equal(r.sqliteTotal, 37); assert.deepEqual(codes(r, "blocking"), []); assert.deepEqual(codes(r, "warning"), []);
     assert.equal(r.cloudinary.referencedUrls, 1); assert.equal(r.cloudinary.verified, 1);
   });
   const withData = async (mutate: (db: any) => void, ledger = ledgerOf([URL1])) => analyze({ schema, sqlite: await sqliteSnap(await makeSqlite({ mutate })), pg: null, ledger });
@@ -190,10 +190,10 @@ const codes = (r: ReturnType<typeof analyze>, sev?: string) => r.findings.filter
     const sqliteOk = await sqliteSnap(await makeSqlite());
     const run = async (o: PgOpt = {}, sq = sqliteOk) => { await makePg(client, o); return analyze({ schema, sqlite: sq, pg: await pgSnap(client), ledger: ledgerOf([URL1]) }); };
     try {
-      await t("Neon（乾淨）：36 表都在、全空、結構一致 → 符合進入搬移階段；唯讀交易 on、寫入統計前後相同", async () => {
+      await t("Neon（乾淨）：37 表都在、全空、結構一致 → 符合進入搬移階段；唯讀交易 on、寫入統計前後相同", async () => {
         await makePg(client); const snap = await pgSnap(client); const r = analyze({ schema, sqlite: sqliteOk, pg: snap, ledger: ledgerOf([URL1]) });
-        assert.equal(snap.readOnly, "on"); assert.equal(snap.tables.size, 36); assert.equal(r.pgTotal, 0); assert.deepEqual(codes(r, "blocking"), [], codes(r).join()); assert.equal(r.eligible, true, JSON.stringify(r.conditions.filter((c) => !c.ok)));
-        assert.ok(r.pgTotal === 0 && r.sqliteTotal === 36);
+        assert.equal(snap.readOnly, "on"); assert.equal(snap.tables.size, 37); assert.equal(r.pgTotal, 0); assert.deepEqual(codes(r, "blocking"), [], codes(r).join()); assert.equal(r.eligible, true, JSON.stringify(r.conditions.filter((c) => !c.ok)));
+        assert.ok(r.pgTotal === 0 && r.sqliteTotal === 37);
       });
       await t("Neon 結構差異：缺資料表／缺欄位／型別不同／NOT NULL 與 schema 不同 → 阻擋；缺外鍵 → 警告", async () => {
         assert.ok(codes(await run({ dropTable: "Partner" }), "blocking").includes("pg-missing-table"));

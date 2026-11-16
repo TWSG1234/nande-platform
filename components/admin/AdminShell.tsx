@@ -22,6 +22,7 @@ const NAV_ITEMS = [
   { href: "/admin/assistant", label: "🤖 威洛小助理設定" },
   { href: "/admin/assistant/types", label: "🎭 威洛問題類型" },
   { href: "/admin/assistant/questions", label: "🙋 威洛問題求助" },
+  { href: "/admin/google-drive", label: "☁️ Google Drive 授權" },
   { href: "/admin/settings", label: "⚙️ 網站設定" },
 ];
 
