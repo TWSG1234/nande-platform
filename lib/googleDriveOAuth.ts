@@ -24,12 +24,24 @@ export const STATE_COOKIE = "nande_gdrive_state";
 export const STATE_COOKIE_PATH = "/api/admin/google-drive";
 export const STATE_TTL_SECONDS = 600;
 
+/** 可以安全寫進日誌的診斷資訊（已過濾機密）。 */
+export interface DriveDiag {
+  stage: string; // token-exchange | duplicate-code | account-check | folder-check | db-save | token-refresh | upload ...
+  httpStatus?: number;
+  googleError?: string; // Google 回傳的 error（例如 invalid_client）
+  description?: string; // 已過濾的 error_description
+  errName?: string;
+  netCode?: string; // 網路層錯誤碼（ENOTFOUND、ETIMEDOUT…）
+}
+
 export class DriveError extends Error {
   code: DriveErrorCode;
-  constructor(code: DriveErrorCode, detail?: string) {
+  diag?: DriveDiag;
+  constructor(code: DriveErrorCode, detail?: string, diag?: DriveDiag) {
     super(detail ? `${DRIVE_MESSAGES[code]}（${detail}）` : DRIVE_MESSAGES[code]);
     this.name = "DriveError";
     this.code = code;
+    this.diag = diag;
   }
 }
 
@@ -46,14 +58,24 @@ export interface OAuthConfig {
 
 export type DriveMode = "off" | "misconfigured" | "on";
 
+/**
+ * 去掉前後空白／換行，以及整個值外層多貼的一對引號（在 Vercel 後台貼成 "xxx" 是常見的錯誤，
+ * 會讓 Google 回 invalid_client）。刻意「不」用在加密金鑰與 NEXTAUTH_SECRET：那兩個值一改就會變成另一把金鑰。
+ */
+export function cleanEnv(v: string | undefined): string {
+  let x = (v ?? "").trim();
+  if (x.length >= 2 && ((x[0] === '"' && x.endsWith('"')) || (x[0] === "'" && x.endsWith("'")))) x = x.slice(1, -1).trim();
+  return x;
+}
+
 /** 不論是否缺漏，都回傳目前讀到的值與缺少的環境變數名稱（不含任何值）。 */
 export function readOAuthEnv(env: Env = process.env) {
-  const baseUrl = (env.NEXTAUTH_URL || "").replace(/\/+$/, "");
+  const baseUrl = cleanEnv(env.NEXTAUTH_URL).replace(/\/+$/, "");
   const cfg = {
-    clientId: (env.GOOGLE_OAUTH_CLIENT_ID || "").trim(),
-    clientSecret: (env.GOOGLE_OAUTH_CLIENT_SECRET || "").trim(),
-    folderId: (env.GOOGLE_DRIVE_FOLDER_ID || "").trim(),
-    redirectUri: (env.GOOGLE_OAUTH_REDIRECT_URI || (baseUrl ? baseUrl + CALLBACK_PATH : "")).trim(),
+    clientId: cleanEnv(env.GOOGLE_OAUTH_CLIENT_ID),
+    clientSecret: cleanEnv(env.GOOGLE_OAUTH_CLIENT_SECRET),
+    folderId: cleanEnv(env.GOOGLE_DRIVE_FOLDER_ID),
+    redirectUri: cleanEnv(env.GOOGLE_OAUTH_REDIRECT_URI) || (baseUrl ? baseUrl + CALLBACK_PATH : ""),
     encryptionKey: env.GOOGLE_TOKEN_ENCRYPTION_KEY || "",
     stateSecret: env.NEXTAUTH_SECRET || "",
   };
@@ -209,12 +231,96 @@ export function isInvalidGrant(e: unknown): boolean {
   return d?.error === "invalid_grant" || /invalid_grant/.test(String(g?.message ?? ""));
 }
 
-/** 只回傳可以安全寫進日誌的資訊。gaxios 的原始錯誤物件含 request config（可能有 token／secret），絕不直接 console.error 它。 */
+const MIN_SECRET_LEN = 6;
+
+/** 目前環境中已知的機密值，過濾文字時一律先遮蔽（呼叫端不必每次傳）。 */
+function envSecrets(): string[] {
+  const { cfg } = readOAuthEnv();
+  return [cfg.clientSecret, cfg.encryptionKey, cfg.stateSecret, process.env.GOOGLE_OAUTH_CLIENT_SECRET, process.env.GOOGLE_TOKEN_ENCRYPTION_KEY].filter((x): x is string => Boolean(x));
+}
+
+/** 過濾可能出現在錯誤文字裡的機密：已知的機密值、常見 token 格式、Authorization、email，並限制長度。 */
+export function sanitizeText(text: unknown, secrets: (string | undefined | null)[] = [], max = 200): string {
+  let t = String(text ?? "").replace(/\s+/g, " ").trim();
+  for (const sec of [...secrets, ...envSecrets()]) {
+    if (sec && sec.length >= MIN_SECRET_LEN) t = t.split(sec).join("[REDACTED]");
+    // 同一個值被 URL 編碼後出現時也要擋
+    if (sec && sec.length >= MIN_SECRET_LEN) t = t.split(encodeURIComponent(sec)).join("[REDACTED]");
+  }
+  t = t
+    .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/((?:set-)?cookie\s*[:=]\s*)[^;\n]+/gi, "$1[REDACTED]")
+    .replace(/ya29\.[\w.-]+/g, "[REDACTED]")
+    .replace(/1\/\/[\w.-]+/g, "[REDACTED]")
+    .replace(/GOCSPX-[\w-]+/g, "[REDACTED]")
+    .replace(/\b4\/[\w-]{20,}/g, "[REDACTED]")
+    .replace(/((?:code|client_secret|refresh_token|access_token|id_token|token|secret|password)=)[^&\s"']+/gi, "$1[REDACTED]")
+    .replace(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, "[email]")
+    .replace(/[A-Za-z0-9_\-.~+/=]{40,}/g, "[REDACTED]");
+  return t.length > max ? t.slice(0, max) + "…" : t;
+}
+
+/** 從 Google／gaxios 錯誤取出可記錄的欄位（status、error、過濾後的 error_description）。 */
+export function diagnose(e: unknown, stage: string, secrets: (string | undefined | null)[] = []): DriveDiag {
+  if (e instanceof DriveError && e.diag) return e.diag;
+  const g = e as GErr & { code?: string | number };
+  const data = g?.response?.data as { error?: unknown; error_description?: unknown } | undefined;
+  let googleError: string | undefined;
+  let description: string | undefined;
+  if (typeof data?.error === "string") googleError = data.error;
+  else if (data?.error && typeof data.error === "object") {
+    const o = data.error as { status?: string; message?: string; errors?: { reason?: string }[] };
+    googleError = o.errors?.[0]?.reason || o.status;
+    description = o.message;
+  }
+  if (typeof data?.error_description === "string") description = data.error_description;
+  if (!description && !g?.response) description = (e as Error)?.message; // 沒有 HTTP 回應（網路層）才用 message
+  return {
+    stage,
+    httpStatus: httpStatusOf(e),
+    googleError: googleError ? sanitizeText(googleError, secrets, 60) : undefined,
+    description: description ? sanitizeText(description, secrets) : undefined,
+    errName: (e as Error)?.name,
+    netCode: typeof g?.code === "string" ? sanitizeText(g.code, secrets, 30) : undefined,
+  };
+}
+
+/** 給管理員／維護者的下一步提示（只放在日誌，不含機密）。 */
+export function hintFor(d: DriveDiag): string {
+  const ge = d.googleError ?? "";
+  if (ge === "invalid_client") return "Client ID／Client Secret 不正確或不是同一組：檢查 Vercel 的 GOOGLE_OAUTH_CLIENT_SECRET 是否完整、沒有多餘引號或空白、與 Client ID 屬於同一個 OAuth 用戶端，修改後要 Redeploy";
+  if (ge === "redirect_uri_mismatch") return "redirect_uri 與 Google Cloud 登記的不一致：日誌中的 redirectUri 必須逐字出現在『已授權的重新導向 URI』";
+  if (ge === "invalid_grant") return "授權碼已使用、過期，或換碼時的 redirect_uri 與授權時不同；請重新從授權頁開始一次";
+  if (ge === "unauthorized_client") return "此用戶端不允許這種授權方式，確認建立的是『網頁應用程式』類型";
+  if (ge === "invalid_request") return "請求缺少或帶了錯誤參數（常見：redirect_uri 或 client 設定缺漏）";
+  if (ge === "access_denied") return "Google 帳號未被允許（測試模式下需在 Audience 加入測試使用者）";
+  if (d.netCode && /ENOTFOUND|ETIMEDOUT|ECONNRESET|EAI_AGAIN/.test(d.netCode)) return "連到 Google 的網路層失敗，通常是暫時性，可稍後重試";
+  if (d.stage === "duplicate-code") return "同一個授權碼被送出兩次，只有第一次會成功";
+  if (d.stage === "db-save") return "授權碼已換成功，但寫入資料庫失敗：檢查 GoogleDriveAuth 資料表與資料庫連線";
+  if (d.stage === "account-check" || d.stage === "folder-check") return "授權成功，但驗證帳號或資料夾失敗：檢查 Drive API 是否啟用、資料夾 ID 與該 Gmail 的權限";
+  return "";
+}
+
+/** 可以安全寫進日誌的單行描述（含 stage／HTTP status／Google error／過濾後的說明）。 */
 export function describeError(e: unknown): string {
-  if (e instanceof DriveError) return e.code;
+  if (e instanceof DriveError) {
+    const d = e.diag;
+    return [e.code, d ? `stage=${d.stage}` : "", d?.httpStatus ? `status=${d.httpStatus}` : "", d?.googleError ? `google_error=${d.googleError}` : "", d?.netCode ? `net=${d.netCode}` : "", d?.description ? `desc="${d.description}"` : "", d ? (hintFor(d) ? `hint="${hintFor(d)}"` : "") : ""].filter(Boolean).join(" ");
+  }
   const g = e as GErr;
-  const reason = typeof g?.response?.data?.error === "object" ? g.response.data.error.errors?.[0]?.reason : g?.response?.data?.error;
-  return [(e as Error)?.name ?? "Error", httpStatusOf(e) ?? "", reason ?? "", isInvalidGrant(e) ? "invalid_grant" : ""].filter(Boolean).join(" ");
+  const d = diagnose(e, "unknown");
+  return [(e as Error)?.name ?? "Error", d.httpStatus ?? "", d.googleError ?? "", isInvalidGrant(e) ? "invalid_grant" : "", d.description ? `desc="${d.description}"` : ""].filter(Boolean).join(" ") || String(g?.message ? "error" : "unknown");
+}
+
+// 同一個授權碼只能換一次：同一個伺服器實例內擋掉重複送出（跨實例時由 Google 回 invalid_grant）
+const usedCodes = new Map<string, number>();
+function claimCode(code: string): boolean {
+  const now = Date.now();
+  for (const [k, t] of usedCodes) if (now - t > 10 * 60_000) usedCodes.delete(k);
+  const h = crypto.createHash("sha256").update(code).digest("hex");
+  if (usedCodes.has(h)) return false;
+  usedCodes.set(h, now);
+  return true;
 }
 
 async function withRetry<T>(fn: () => Promise<T>, tries = 3): Promise<T> {
@@ -264,7 +370,7 @@ async function authorizedDrive(deps: DriveDeps) {
       await deps.store.markRevoked("DRIVE_AUTH_REVOKED").catch(() => undefined);
       throw new DriveError("DRIVE_AUTH_REVOKED");
     }
-    throw new DriveError("DRIVE_UPLOAD_FAILED", describeError(e));
+    throw new DriveError("DRIVE_UPLOAD_FAILED", undefined, diagnose(e, "token-refresh", [cfg.clientSecret, cfg.encryptionKey, refresh]));
   }
   const drive: any = (deps.makeDrive ?? ((c: OAuth2Client) => google.drive({ version: "v3", auth: c })))(client);
   return { cfg, drive, client };
@@ -300,12 +406,12 @@ export async function uploadBufferViaOAuth(
       throw new DriveError("DRIVE_AUTH_REVOKED");
     }
     const s = httpStatusOf(e);
-    if (!fileId && (s === 404 || s === 403)) throw new DriveError("DRIVE_FOLDER_INACCESSIBLE", `HTTP ${s}`);
+    if (!fileId && (s === 404 || s === 403)) throw new DriveError("DRIVE_FOLDER_INACCESSIBLE", undefined, diagnose(e, "upload", [cfg.clientSecret, cfg.encryptionKey]));
     if (s === 401) {
       await deps.store.markRevoked("DRIVE_AUTH_REVOKED").catch(() => undefined);
       throw new DriveError("DRIVE_AUTH_REVOKED");
     }
-    throw new DriveError("DRIVE_UPLOAD_FAILED", describeError(e));
+    throw new DriveError("DRIVE_UPLOAD_FAILED", undefined, diagnose(e, "upload", [cfg.clientSecret, cfg.encryptionKey]));
   }
 }
 
@@ -316,12 +422,12 @@ async function checkFolder(drive: any, folderId: string) {
     );
     const d = f.data;
     if (d.mimeType !== "application/vnd.google-apps.folder" || d.trashed || d.capabilities?.canAddChildren === false) {
-      throw new DriveError("DRIVE_FOLDER_INACCESSIBLE", "不是可寫入的資料夾");
+      throw new DriveError("DRIVE_FOLDER_INACCESSIBLE", "不是可寫入的資料夾", { stage: "folder-check" });
     }
     return { name: String(d.name ?? "") };
   } catch (e) {
     if (e instanceof DriveError) throw e;
-    throw new DriveError("DRIVE_FOLDER_INACCESSIBLE", describeError(e));
+    throw new DriveError("DRIVE_FOLDER_INACCESSIBLE", undefined, diagnose(e, "folder-check"));
   }
 }
 
@@ -331,36 +437,57 @@ export async function testConnection(deps: DriveDeps) {
   return checkFolder(drive, cfg.folderId);
 }
 
-/** callback：用授權碼換 token，確認 scope／Refresh Token／資料夾權限後才加密保存。 */
+/** callback：用授權碼換 token，確認 scope／Refresh Token／資料夾權限後才加密保存。每個階段的失敗都帶 stage 與過濾後的 Google 錯誤。 */
 export async function completeAuthorization(code: string, adminId: string | null, deps: DriveDeps) {
   const cfg = requireConfig(deps.env);
+  const secrets: string[] = [cfg.clientSecret, cfg.encryptionKey, cfg.stateSecret, code];
   const client = (deps.makeClient ?? createOAuthClient)(cfg);
+
+  if (!claimCode(code)) throw new DriveError("DRIVE_EXCHANGE_FAILED", undefined, { stage: "duplicate-code" });
+
   let tokens;
   try {
     tokens = (await client.getToken(code)).tokens;
   } catch (e) {
-    throw new DriveError("DRIVE_EXCHANGE_FAILED", describeError(e));
+    throw new DriveError("DRIVE_EXCHANGE_FAILED", undefined, diagnose(e, "token-exchange", secrets));
   }
-  if (!tokens.refresh_token) throw new DriveError("DRIVE_NO_REFRESH_TOKEN");
+  const toRevoke = tokens.refresh_token ?? tokens.access_token ?? undefined;
+  if (toRevoke) secrets.push(toRevoke);
+  if (tokens.access_token) secrets.push(tokens.access_token);
+  if (!tokens.refresh_token) throw new DriveError("DRIVE_NO_REFRESH_TOKEN", undefined, { stage: "token-exchange" });
   const granted = String(tokens.scope || "");
   if (!granted.split(/\s+/).includes(DRIVE_SCOPE)) {
     await client.revokeToken(tokens.refresh_token).catch(() => undefined);
-    throw new DriveError("DRIVE_SCOPE_MISSING");
+    throw new DriveError("DRIVE_SCOPE_MISSING", undefined, { stage: "token-exchange" });
   }
   client.setCredentials(tokens);
   const drive: any = (deps.makeDrive ?? ((c: OAuth2Client) => google.drive({ version: "v3", auth: c })))(client);
+  const abort = async (err: DriveError) => {
+    await client.revokeToken(tokens.refresh_token as string).catch(() => undefined); // 不保存就把剛拿到的授權作廢
+    throw err;
+  };
+
   let email = "";
   try {
     const me = await withRetry<any>(() => drive.about.get({ fields: "user(emailAddress)" }));
     email = String(me.data.user?.emailAddress ?? "");
-    const folder = await checkFolder(drive, cfg.folderId);
-    await deps.store.save({ refreshTokenEnc: encryptToken(tokens.refresh_token, cfg.encryptionKey), accountEmail: email, scope: granted, adminId });
-    return { email, folderName: folder.name };
   } catch (e) {
-    // 資料夾不可寫入／資料表不存在等：不保存，並把剛拿到的 token 作廢，避免留下沒用的授權
-    await client.revokeToken(tokens.refresh_token).catch(() => undefined);
-    throw e instanceof DriveError ? e : new DriveError("DRIVE_EXCHANGE_FAILED", describeError(e));
+    return abort(new DriveError("DRIVE_VERIFY_FAILED", undefined, diagnose(e, "account-check", secrets)));
   }
+  let folderName = "";
+  try {
+    folderName = (await checkFolder(drive, cfg.folderId)).name;
+  } catch (e) {
+    if (e instanceof DriveError) return abort(new DriveError(e.code, undefined, { ...(e.diag ?? { stage: "folder-check" }), stage: "folder-check" }));
+    return abort(new DriveError("DRIVE_VERIFY_FAILED", undefined, diagnose(e, "folder-check", secrets)));
+  }
+  try {
+    await deps.store.save({ refreshTokenEnc: encryptToken(tokens.refresh_token, cfg.encryptionKey), accountEmail: email, scope: granted, adminId });
+  } catch (e) {
+    if (e instanceof DriveError) return abort(new DriveError(e.code, undefined, { stage: "db-save" }));
+    return abort(new DriveError("DRIVE_STORE_FAILED", undefined, { ...diagnose(e, "db-save", secrets), description: undefined })); // 資料庫錯誤文字可能含連線資訊，只留 errName／code
+  }
+  return { email, folderName };
 }
 
 export async function disconnect(deps: DriveDeps) {

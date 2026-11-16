@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/requireAdmin";
 import { prisma } from "@/lib/prisma";
-import { completeAuthorization, describeError, DriveError, prismaDriveAuthStore, requireConfig, STATE_COOKIE, STATE_COOKIE_PATH, verifyState } from "@/lib/googleDriveOAuth";
+import { completeAuthorization, describeError, DriveError, prismaDriveAuthStore, readOAuthEnv, requireConfig, STATE_COOKIE, STATE_COOKIE_PATH, verifyState } from "@/lib/googleDriveOAuth";
 
 export const dynamic = "force-dynamic";
 
@@ -31,7 +31,22 @@ export async function GET(req: NextRequest) {
     await completeAuthorization(code, adminId || null, { store: prismaDriveAuthStore(prisma) });
     return done("result=ok");
   } catch (e) {
-    console.error("[drive-callback]", describeError(e));
+    // 只記錄：錯誤代碼、階段、Google 的 HTTP status／error／過濾後的說明，以及不含機密的設定資訊
+    // （redirect_uri、Client ID 尾碼、各參數「是否存在」）。授權碼、token、Secret、Cookie 一律不記錄。
+    const { cfg: c } = readOAuthEnv();
+    console.error(
+      "[drive-callback]",
+      describeError(e),
+      JSON.stringify({
+        redirectUri: c.redirectUri || null,
+        clientIdTail: c.clientId ? "…" + c.clientId.slice(-8) : null,
+        clientSecretLength: c.clientSecret.length,
+        hasCode: sp.has("code"),
+        hasState: sp.has("state"),
+        hasStateCookie: Boolean(req.cookies.get(STATE_COOKIE)),
+        googleReturnedError: sp.get("error") ? String(sp.get("error")).slice(0, 40) : null,
+      })
+    );
     return done(`error=${e instanceof DriveError ? e.code : "DRIVE_EXCHANGE_FAILED"}`);
   }
 }

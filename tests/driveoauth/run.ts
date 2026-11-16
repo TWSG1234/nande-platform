@@ -1,8 +1,10 @@
 /** Google Drive 個人 Gmail OAuth 測試：全部使用假的 Google 用戶端與記憶體儲存，不連網、不碰資料庫。 */
 import assert from "assert";
+import http from "http";
+import type { AddressInfo } from "net";
 import { OAuth2Client } from "google-auth-library";
 import {
-  buildAuthUrl, completeAuthorization, createOAuthClient, createState, decryptToken, describeError, disconnect, DriveAuthStore, DriveError,
+  buildAuthUrl, cleanEnv, completeAuthorization, diagnose, hintFor, sanitizeText, OAuthConfig, createOAuthClient, createState, decryptToken, describeError, disconnect, DriveAuthStore, DriveError,
   driveMode, DRIVE_SCOPE, encryptToken, prismaDriveAuthStore, readOAuthEnv, statusSummary, testConnection, uploadBufferViaOAuth, verifyState, AuthRow,
 } from "../../lib/googleDriveOAuth";
 
@@ -12,7 +14,8 @@ const ENV: Env = {
   GOOGLE_TOKEN_ENCRYPTION_KEY: "enc-key-" + "k".repeat(30), NEXTAUTH_URL: "https://nande-platform.vercel.app/", NEXTAUTH_SECRET: SECRET,
 };
 type Env = Record<string, string | undefined>;
-let pass = 0, fail = 0;
+let pass = 0, fail = 0, codeN = 0;
+const uc = () => `unique-auth-code-${++codeN}-${"u".repeat(12)}`;
 async function t(name: string, fn: () => unknown | Promise<unknown>) {
   try { await fn(); pass++; console.log("  ✅ " + name); } catch (e) { fail++; console.log("  ❌ " + name + "\n     " + (e as Error).message); }
 }
@@ -90,29 +93,29 @@ const activeRow = (): AuthRow => ({ refreshTokenEnc: encryptToken("RT-secret", E
   });
   await t("callback 成功：加密保存 Refresh Token，資料庫內容不含明文", async () => {
     const m = memStore(); const { c, calls } = fakeClient({ tokens: { refresh_token: "RT-NEW", access_token: "AT", scope: DRIVE_SCOPE } }); const { d } = fakeDrive();
-    const r = await completeAuthorization("code", "adm", { store: m.store, env: ENV, makeClient: () => c, makeDrive: () => d });
+    const r = await completeAuthorization(uc(), "adm", { store: m.store, env: ENV, makeClient: () => c, makeDrive: () => d });
     assert.equal(r.email, "admin@gmail.test"); const row = m.get()!;
     assert.ok(!JSON.stringify(row).includes("RT-NEW")); assert.equal(decryptToken(row.refreshTokenEnc, ENV.GOOGLE_TOKEN_ENCRYPTION_KEY!), "RT-NEW"); assert.deepEqual(calls.revoked, []);
   });
   await t("callback：沒有 Refresh Token → DRIVE_NO_REFRESH_TOKEN 且不保存", async () => {
     const m = memStore(); const { c } = fakeClient({ tokens: { access_token: "AT", scope: DRIVE_SCOPE } });
-    await assert.rejects(completeAuthorization("c", null, { store: m.store, env: ENV, makeClient: () => c, makeDrive: () => fakeDrive().d }), (e: DriveError) => e.code === "DRIVE_NO_REFRESH_TOKEN");
+    await assert.rejects(completeAuthorization(uc(), null, { store: m.store, env: ENV, makeClient: () => c, makeDrive: () => fakeDrive().d }), (e: DriveError) => e.code === "DRIVE_NO_REFRESH_TOKEN");
     assert.equal(m.get(), null);
   });
   await t("callback：沒勾 Drive 權限 → DRIVE_SCOPE_MISSING，token 被撤銷、不保存", async () => {
     const m = memStore(); const { c, calls } = fakeClient({ tokens: { refresh_token: "RT", scope: "openid" } });
-    await assert.rejects(completeAuthorization("c", null, { store: m.store, env: ENV, makeClient: () => c, makeDrive: () => fakeDrive().d }), (e: DriveError) => e.code === "DRIVE_SCOPE_MISSING");
+    await assert.rejects(completeAuthorization(uc(), null, { store: m.store, env: ENV, makeClient: () => c, makeDrive: () => fakeDrive().d }), (e: DriveError) => e.code === "DRIVE_SCOPE_MISSING");
     assert.deepEqual(calls.revoked, ["RT"]); assert.equal(m.get(), null);
   });
   await t("callback：授權碼無效 → DRIVE_EXCHANGE_FAILED", async () => {
     const { c } = fakeClient({ getTokenErr: gErr(400, "invalid_grant") });
-    await assert.rejects(completeAuthorization("c", null, { store: memStore().store, env: ENV, makeClient: () => c }), (e: DriveError) => e.code === "DRIVE_EXCHANGE_FAILED");
+    await assert.rejects(completeAuthorization(uc(), null, { store: memStore().store, env: ENV, makeClient: () => c }), (e: DriveError) => e.code === "DRIVE_EXCHANGE_FAILED");
   });
   await t("callback：Gmail 無法寫入指定資料夾 → DRIVE_FOLDER_INACCESSIBLE，不保存、token 撤銷", async () => {
     const m = memStore(); const { c, calls } = fakeClient({ tokens: { refresh_token: "RT", scope: DRIVE_SCOPE } });
-    await assert.rejects(completeAuthorization("c", null, { store: m.store, env: ENV, makeClient: () => c, makeDrive: () => fakeDrive({ getErr: gErr(404) }).d }), (e: DriveError) => e.code === "DRIVE_FOLDER_INACCESSIBLE");
+    await assert.rejects(completeAuthorization(uc(), null, { store: m.store, env: ENV, makeClient: () => c, makeDrive: () => fakeDrive({ getErr: gErr(404) }).d }), (e: DriveError) => e.code === "DRIVE_FOLDER_INACCESSIBLE");
     assert.equal(m.get(), null); assert.deepEqual(calls.revoked, ["RT"]);
-    await assert.rejects(completeAuthorization("c", null, { store: m.store, env: ENV, makeClient: () => fakeClient({ tokens: { refresh_token: "R2", scope: DRIVE_SCOPE } }).c, makeDrive: () => fakeDrive({ getData: { mimeType: "image/png" } }).d }), (e: DriveError) => e.code === "DRIVE_FOLDER_INACCESSIBLE");
+    await assert.rejects(completeAuthorization(uc(), null, { store: m.store, env: ENV, makeClient: () => fakeClient({ tokens: { refresh_token: "R2", scope: DRIVE_SCOPE } }).c, makeDrive: () => fakeDrive({ getData: { mimeType: "image/png" } }).d }), (e: DriveError) => e.code === "DRIVE_FOLDER_INACCESSIBLE");
   });
   await t("上傳成功：用 Refresh Token 取得 Access Token、寫入指定資料夾、設為連結可檢視", async () => {
     const m = memStore(activeRow()); const { c, calls: cc } = fakeClient(); const { d, calls } = fakeDrive();
@@ -164,6 +167,120 @@ const activeRow = (): AuthRow => ({ refreshTokenEnc: encryptToken("RT-secret", E
     const e = Object.assign(new Error("Request failed"), { config: { headers: { Authorization: "Bearer AT-LEAK" }, data: "refresh_token=RT-LEAK&client_secret=CS-LEAK" }, response: { status: 401, data: { error: "invalid_grant" } } });
     const s = describeError(e); assert.ok(!/LEAK/.test(s) && s.includes("invalid_grant"));
   });
+  // ── 授權碼交換：用「真正的 google-auth-library」打到本機假的 Token Endpoint ──
+  console.log("\n授權碼交換與錯誤紀錄");
+  type Seen = { method?: string; url?: string; ctype?: string; form?: Record<string, string> };
+  async function tokenServer(reply: (form: Record<string, string>, n: number) => { status: number; body: unknown }) {
+    const seen: Seen[] = [];
+    const srv = http.createServer((req, res) => {
+      let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => {
+        const form = Object.fromEntries(new URLSearchParams(b)); seen.push({ method: req.method, url: req.url, ctype: String(req.headers["content-type"]), form });
+        const r = reply(form, seen.length); res.writeHead(r.status, { "Content-Type": "application/json" }); res.end(JSON.stringify(r.body));
+      });
+    });
+    await new Promise<void>((ok) => srv.listen(0, "127.0.0.1", ok));
+    const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}/token`;
+    const makeClient = (cfg: OAuthConfig) => new OAuth2Client({ clientId: cfg.clientId, clientSecret: cfg.clientSecret, redirectUri: cfg.redirectUri, endpoints: { oauth2TokenUrl: url } });
+    return { seen, makeClient, close: () => new Promise((ok) => srv.close(ok)) };
+  }
+  const AUTH_CODE = "4/0AX4XfWh-authcode-" + "Z".repeat(40);
+  const ACCESS = "ya29.a0-access-" + "A".repeat(30), REFRESH = "1//0g-refresh-" + "R".repeat(30);
+  const ALL_SECRETS = [ENV.GOOGLE_OAUTH_CLIENT_SECRET!, ENV.GOOGLE_TOKEN_ENCRYPTION_KEY!, SECRET, AUTH_CODE, ACCESS, REFRESH, "cookie-nonce-VALUE-123"];
+  const leaks = (text: string) => ALL_SECRETS.filter((x) => text.includes(x));
+
+  await t("POST 格式：Token Endpoint 收到 form-encoded，含 grant_type／code／client_id／client_secret／與授權時相同的 redirect_uri", async () => {
+    const srv = await tokenServer(() => ({ status: 200, body: { refresh_token: REFRESH, access_token: ACCESS, scope: DRIVE_SCOPE, token_type: "Bearer", expires_in: 3599 } }));
+    try {
+      const m = memStore();
+      await completeAuthorization(AUTH_CODE + "1", "adm", { store: m.store, env: ENV, makeClient: srv.makeClient, makeDrive: () => fakeDrive().d });
+      const q = srv.seen[0]!; assert.equal(q.method, "POST"); assert.match(q.ctype!, /application\/x-www-form-urlencoded/); assert.equal(q.url, "/token");
+      assert.equal(q.form!.grant_type, "authorization_code"); assert.equal(q.form!.code, AUTH_CODE + "1"); assert.equal(q.form!.client_id, ENV.GOOGLE_OAUTH_CLIENT_ID);
+      assert.equal(q.form!.client_secret, ENV.GOOGLE_OAUTH_CLIENT_SECRET);
+      // 授權網址用的 redirect_uri 與換碼用的完全相同
+      const authUri = new URL(buildAuthUrl(createOAuthClient(readOAuthEnv(ENV).cfg), "S.S")).searchParams.get("redirect_uri");
+      assert.equal(q.form!.redirect_uri, authUri); assert.equal(authUri, "https://nande-platform.vercel.app/api/admin/google-drive/callback");
+      assert.equal(srv.seen.length, 1);
+    } finally { await srv.close(); }
+  });
+  await t("Google 回 invalid_client：紀錄含 stage／HTTP 400／google_error／提示，且不含任何機密", async () => {
+    const srv = await tokenServer(() => ({ status: 401, body: { error: "invalid_client", error_description: `Unauthorized for secret ${ENV.GOOGLE_OAUTH_CLIENT_SECRET} code=${AUTH_CODE}` } }));
+    try {
+      let err: DriveError | null = null;
+      try { await completeAuthorization(AUTH_CODE, "adm", { store: memStore().store, env: ENV, makeClient: srv.makeClient }); } catch (e) { err = e as DriveError; }
+      assert.ok(err instanceof DriveError); assert.equal(err!.code, "DRIVE_EXCHANGE_FAILED");
+      assert.equal(err!.diag!.stage, "token-exchange"); assert.equal(err!.diag!.httpStatus, 401); assert.equal(err!.diag!.googleError, "invalid_client");
+      const line = describeError(err); assert.match(line, /stage=token-exchange/); assert.match(line, /status=401/); assert.match(line, /google_error=invalid_client/); assert.match(line, /hint="Client ID／Client Secret/);
+      assert.deepEqual(leaks(line + JSON.stringify(err!.diag) + err!.message + String(err!.stack)), []);
+      assert.ok(line.includes("[REDACTED]"));
+    } finally { await srv.close(); }
+  });
+  await t("Google 回 invalid_grant／redirect_uri_mismatch：各自帶出可辨識的原因與提示", async () => {
+    for (const [ge, hint] of [["invalid_grant", /授權碼已使用/], ["redirect_uri_mismatch", /redirect_uri 與 Google Cloud/]] as const) {
+      const srv = await tokenServer(() => ({ status: 400, body: { error: ge, error_description: "Bad Request" } }));
+      try {
+        const err = await completeAuthorization(AUTH_CODE + ge, null, { store: memStore().store, env: ENV, makeClient: srv.makeClient }).then(() => null, (e) => e as DriveError);
+        assert.equal(err!.diag!.googleError, ge); assert.match(describeError(err), hint); assert.equal(err!.diag!.httpStatus, 400);
+      } finally { await srv.close(); }
+    }
+  });
+  await t("同一授權碼送出兩次：第二次不會再打 Google，stage=duplicate-code", async () => {
+    const srv = await tokenServer(() => ({ status: 400, body: { error: "invalid_grant" } }));
+    try {
+      const dep = { store: memStore().store, env: ENV, makeClient: srv.makeClient };
+      await completeAuthorization("dup-code-" + "d".repeat(20), null, dep).catch(() => undefined);
+      const err = await completeAuthorization("dup-code-" + "d".repeat(20), null, dep).then(() => null, (e) => e as DriveError);
+      assert.equal(err!.diag!.stage, "duplicate-code"); assert.equal(srv.seen.length, 1);
+    } finally { await srv.close(); }
+  });
+  await t("網路層失敗（連不到 Token Endpoint）：記錄 net code，不含機密", async () => {
+    const mk = (cfg: OAuthConfig) => new OAuth2Client({ clientId: cfg.clientId, clientSecret: cfg.clientSecret, redirectUri: cfg.redirectUri, endpoints: { oauth2TokenUrl: "http://127.0.0.1:1/token" } });
+    const err = await completeAuthorization(AUTH_CODE + "net", null, { store: memStore().store, env: ENV, makeClient: mk }).then(() => null, (e) => e as DriveError);
+    assert.equal(err!.code, "DRIVE_EXCHANGE_FAILED"); assert.equal(err!.diag!.stage, "token-exchange"); assert.ok(err!.diag!.netCode || err!.diag!.description);
+    assert.deepEqual(leaks(describeError(err)), []);
+  });
+  await t("換碼成功後的失敗不再被誤報成『授權碼失敗』：帳號驗證失敗／資料庫寫入失敗各有自己的代碼與 stage，且 token 被撤銷", async () => {
+    const tok = { refresh_token: REFRESH, access_token: ACCESS, scope: DRIVE_SCOPE };
+    // 帳號驗證失敗
+    let fc = fakeClient({ tokens: tok }); const bad = fakeDrive(); (bad.d as any).about.get = async () => { throw Object.assign(new Error(`denied ${ACCESS}`), { response: { status: 403, data: { error: { message: `Drive API disabled for ${ACCESS}`, errors: [{ reason: "accessNotConfigured" }] } } } }); };
+    let err = await completeAuthorization("c-verify-" + "v".repeat(20), null, { store: memStore().store, env: ENV, makeClient: () => fc.c, makeDrive: () => bad.d }).then(() => null, (e) => e as DriveError);
+    assert.equal(err!.code, "DRIVE_VERIFY_FAILED"); assert.equal(err!.diag!.stage, "account-check"); assert.equal(err!.diag!.httpStatus, 403); assert.equal(err!.diag!.googleError, "accessNotConfigured");
+    assert.deepEqual(fc.calls.revoked, [REFRESH]); assert.deepEqual(leaks(describeError(err) + err!.message), []);
+    // 資料庫寫入失敗（錯誤文字含連線字串與密碼）
+    fc = fakeClient({ tokens: tok }); const m = memStore(); m.store.save = async () => { throw new Error(`connect failed postgres://u:${ENV.GOOGLE_TOKEN_ENCRYPTION_KEY}@host/db`); };
+    err = await completeAuthorization("c-store-" + "s".repeat(20), null, { store: m.store, env: ENV, makeClient: () => fc.c, makeDrive: () => fakeDrive().d }).then(() => null, (e) => e as DriveError);
+    assert.equal(err!.code, "DRIVE_STORE_FAILED"); assert.equal(err!.diag!.stage, "db-save"); assert.equal(err!.diag!.description, undefined);
+    assert.deepEqual(fc.calls.revoked, [REFRESH]); assert.ok(!describeError(err).includes("postgres://")); assert.deepEqual(leaks(describeError(err) + err!.message), []);
+  });
+  await t("sanitizeText：機密值、token 格式、Bearer、URL 參數、email 與長字串都被遮蔽並限制長度", () => {
+    const raw = `Bearer ${ACCESS} code=${AUTH_CODE}&client_secret=abc123XYZ789 ${REFRESH} ${ENV.GOOGLE_OAUTH_CLIENT_SECRET} me@gmail.test ${"x".repeat(80)}`;
+    const out = sanitizeText(raw, [ENV.GOOGLE_OAUTH_CLIENT_SECRET]);
+    assert.deepEqual(leaks(out), []); assert.ok(!out.includes("abc123XYZ789")); assert.ok(!out.includes("me@gmail.test")); assert.ok(out.length <= 201);
+    assert.equal(sanitizeText("Unauthorized"), "Unauthorized");
+  });
+  await t("所有失敗路徑的日誌行：逐一檢查不含 Client Secret／授權碼／Access／Refresh／加密金鑰／NEXTAUTH_SECRET／Cookie", async () => {
+    const lines: string[] = [];
+    Object.assign(process.env, ENV); // 正式環境的機密就在 process.env 裡；過濾器會自己取用
+    const SAFE_TEXT = ALL_SECRETS.slice(0, 6).join(" ") + " Cookie: cookie-nonce-VALUE-123";
+    const gx = (data: unknown) => Object.assign(new Error(`failed ${ALL_SECRETS.join(" ")}`), { config: { headers: { Authorization: `Bearer ${ACCESS}`, Cookie: "cookie-nonce-VALUE-123" }, data: `code=${AUTH_CODE}&client_secret=${ENV.GOOGLE_OAUTH_CLIENT_SECRET}` }, response: { status: 400, data } });
+    for (const [i, d] of ([{ error: "invalid_client", error_description: SAFE_TEXT }, { error: { message: SAFE_TEXT, errors: [{ reason: "x" }] } }, undefined] as const).entries()) {
+      const srv = await tokenServer(() => ({ status: 400, body: d ?? {} }));
+      try {
+        const e1 = await completeAuthorization(AUTH_CODE + "all" + i, null, { store: memStore().store, env: ENV, makeClient: srv.makeClient }).then(() => null, (e) => e);
+        lines.push(describeError(e1), JSON.stringify((e1 as DriveError).diag), (e1 as DriveError).message);
+      } finally { await srv.close(); }
+      lines.push(describeError(gx(d)), JSON.stringify(diagnose(gx(d), "x", ALL_SECRETS)));
+    }
+    lines.push(describeError(gx({ error: "invalid_grant" })));
+    assert.deepEqual(leaks(lines.join("\n")), []);
+    assert.ok(lines.every((l) => !/client_secret=|Bearer ya29/.test(l)));
+  });
+  await t("環境變數整理：外層多貼的引號與空白會去掉；加密金鑰不被修改", () => {
+    assert.equal(cleanEnv('  "abc-123"\n'), "abc-123"); assert.equal(cleanEnv("'x y'"), "x y"); assert.equal(cleanEnv(undefined), ""); assert.equal(cleanEnv('a"b'), 'a"b');
+    const q = readOAuthEnv({ ...ENV, GOOGLE_OAUTH_CLIENT_SECRET: `"${ENV.GOOGLE_OAUTH_CLIENT_SECRET}"`, GOOGLE_TOKEN_ENCRYPTION_KEY: `"${ENV.GOOGLE_TOKEN_ENCRYPTION_KEY}"` }).cfg;
+    assert.equal(q.clientSecret, ENV.GOOGLE_OAUTH_CLIENT_SECRET); assert.equal(q.encryptionKey, `"${ENV.GOOGLE_TOKEN_ENCRYPTION_KEY}"`);
+    assert.equal(hintFor({ stage: "token-exchange", googleError: "invalid_client" }).includes("引號"), true);
+  });
+
   console.log(`\n通過 ${pass}，失敗 ${fail}`);
   process.exit(fail ? 1 : 0);
 })();

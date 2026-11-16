@@ -10,7 +10,9 @@ export type DriveErrorCode =
   | "DRIVE_SCOPE_MISSING"
   | "DRIVE_FOLDER_INACCESSIBLE"
   | "DRIVE_UPLOAD_FAILED"
-  | "DRIVE_EXCHANGE_FAILED";
+  | "DRIVE_EXCHANGE_FAILED"
+  | "DRIVE_VERIFY_FAILED"
+  | "DRIVE_STORE_FAILED";
 
 export const DRIVE_MESSAGES: Record<DriveErrorCode, string> = {
   DRIVE_NOT_CONFIGURED: "Google Drive 的環境變數沒有設定齊全（請看「Google Drive 授權」頁面列出的缺少項目）。",
@@ -23,7 +25,9 @@ export const DRIVE_MESSAGES: Record<DriveErrorCode, string> = {
   DRIVE_SCOPE_MISSING: "授權時沒有勾選 Google Drive 權限。請重新授權，並在授權畫面保留 Drive 權限的勾選。",
   DRIVE_FOLDER_INACCESSIBLE: "授權的 Google 帳號無法寫入 GOOGLE_DRIVE_FOLDER_ID 指定的資料夾（可能用了不同的 Gmail，或資料夾 ID 錯誤）。",
   DRIVE_UPLOAD_FAILED: "上傳到 Google Drive 失敗，請稍後再試一次。",
-  DRIVE_EXCHANGE_FAILED: "向 Google 換取授權憑證失敗（授權碼可能已使用過或過期）。請重新授權。",
+  DRIVE_EXCHANGE_FAILED: "向 Google 換取授權憑證失敗（可能是授權碼已使用／過期，或 Client ID／Secret、Redirect URI 設定不符）。請重新授權；若持續發生，請查看 Vercel Logs 的 [drive-callback] 紀錄。",
+  DRIVE_VERIFY_FAILED: "授權碼已換成功，但驗證 Google 帳號或資料夾時失敗，授權沒有被保存。請查看 Vercel Logs 的 [drive-callback] 紀錄。",
+  DRIVE_STORE_FAILED: "授權碼已換成功，但寫入資料庫失敗，授權沒有被保存。請確認 GoogleDriveAuth 資料表與資料庫連線。",
 };
 
 export function driveMessage(code: string | null | undefined): string {
