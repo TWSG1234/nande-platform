@@ -4,6 +4,8 @@ import { useState } from "react";
 import Link from "next/link";
 import { Plus, MessageCircle, Camera } from "lucide-react";
 import PhotoSubmitModal from "@/components/PhotoSubmitModal";
+import PhotoImage from "@/components/PhotoImage";
+import { PHOTO_PAGE_SIZE, nextCount, remaining, visibleSlice } from "@/lib/photoImage";
 import { useLanguage } from "@/context/LanguageContext";
 import { pick } from "@/lib/i18n/pick";
 import { Localized } from "@/lib/types";
@@ -19,6 +21,8 @@ export type PublicPhoto = {
 
 export default function PhotoWallClient({ photos }: { photos: PublicPhoto[] }) {
   const [modalOpen, setModalOpen] = useState(false);
+  // 一次顯示 12 張；順序沿用伺服器的排序（由新到舊），「載入更多」只是多顯示後面的照片
+  const [shown, setShown] = useState(PHOTO_PAGE_SIZE);
   const { t, lang } = useLanguage();
 
   return (
@@ -43,18 +47,19 @@ export default function PhotoWallClient({ photos }: { photos: PublicPhoto[] }) {
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-            {photos.map((p) => (
+            {visibleSlice(photos, shown).map((p) => (
               <Link
                 key={p.id}
                 href={`/photo-submit/${p.id}`}
                 className="group overflow-hidden rounded-xl2 border border-ink-100 dark:border-white/10 bg-card dark:bg-canvas-darkcard transition hover:shadow-soft dark:hover:shadow-softdark"
               >
-                <div className="aspect-square w-full overflow-hidden bg-ink-50 dark:bg-white/5">
+                <div className="relative aspect-square w-full overflow-hidden bg-ink-50 dark:bg-white/5">
                   {p.imageUrl && (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={p.imageUrl}
+                    <PhotoImage
+                      key={p.imageUrl}
+                      imageUrl={p.imageUrl}
                       alt={pick(p.title, lang)}
+                      kind="grid"
                       className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
                     />
                   )}
@@ -71,6 +76,17 @@ export default function PhotoWallClient({ photos }: { photos: PublicPhoto[] }) {
                 </div>
               </Link>
             ))}
+          </div>
+        )}
+        {remaining(photos.length, shown) > 0 && (
+          <div className="mt-8 text-center">
+            <button
+              type="button"
+              onClick={() => setShown((n) => nextCount(n, photos.length))}
+              className="rounded-full border border-ink-100 dark:border-white/10 px-6 py-2.5 text-sm font-medium text-ink-600 dark:text-ink-100 transition hover:bg-ink-50 dark:hover:bg-white/5"
+            >
+              {t("photo_load_more")}（{remaining(photos.length, shown)}）
+            </button>
           </div>
         )}
       </div>

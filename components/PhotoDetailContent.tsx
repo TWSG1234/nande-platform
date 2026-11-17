@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import CommentSection from "@/components/CommentSection";
+import PhotoImage from "@/components/PhotoImage";
 import { useLanguage } from "@/context/LanguageContext";
 import { pick } from "@/lib/i18n/pick";
 import { Localized } from "@/lib/types";
@@ -26,10 +27,9 @@ export default function PhotoDetailContent({ photo, comments }: { photo: Photo; 
         <ArrowLeft size={13} /> {t("photo_back_to_wall")}
       </Link>
 
-      <div className="mt-4 overflow-hidden rounded-xl2 bg-ink-50 dark:bg-white/5">
+      <div className="relative mt-4 overflow-hidden rounded-xl2 bg-ink-50 dark:bg-white/5">
         {photo.imageUrl && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={photo.imageUrl} alt={pick(photo.title, lang)} className="w-full object-cover" />
+          <PhotoImage key={photo.imageUrl} imageUrl={photo.imageUrl} alt={pick(photo.title, lang)} kind="detail" eager className="w-full object-cover" />
         )}
       </div>
 

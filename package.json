@@ -43,7 +43,8 @@
     "test:pgmigrate": "tsx tests/pgmigrate/run.ts",
     "test:pgreader": "tsx tests/pgmigrate/reader.ts",
     "test:schema": "tsx tests/schema/run.ts",
-    "test:driveoauth": "tsx tests/driveoauth/run.ts"
+    "test:driveoauth": "tsx tests/driveoauth/run.ts",
+    "test:photowall": "tsx --tsconfig tests/photowall/tsconfig.json tests/photowall/run.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
