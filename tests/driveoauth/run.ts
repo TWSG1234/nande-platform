@@ -1,10 +1,13 @@
 /** Google Drive 個人 Gmail OAuth 測試：全部使用假的 Google 用戶端與記憶體儲存，不連網、不碰資料庫。 */
 import assert from "assert";
 import http from "http";
+import fs from "fs";
+import path from "path";
+import { google } from "googleapis";
 import type { AddressInfo } from "net";
 import { OAuth2Client } from "google-auth-library";
 import {
-  buildAuthUrl, cleanEnv, completeAuthorization, diagnose, hintFor, sanitizeText, OAuthConfig, createOAuthClient, createState, decryptToken, describeError, disconnect, DriveAuthStore, DriveError,
+  buildAuthUrl, bufferToStream, cleanEnv, completeAuthorization, diagnose, hintFor, sanitizeText, OAuthConfig, createOAuthClient, createState, decryptToken, describeError, disconnect, DriveAuthStore, DriveError,
   driveMode, DRIVE_SCOPE, encryptToken, prismaDriveAuthStore, readOAuthEnv, statusSummary, testConnection, uploadBufferViaOAuth, verifyState, AuthRow,
 } from "../../lib/googleDriveOAuth";
 
@@ -279,6 +282,67 @@ const activeRow = (): AuthRow => ({ refreshTokenEnc: encryptToken("RT-secret", E
     const q = readOAuthEnv({ ...ENV, GOOGLE_OAUTH_CLIENT_SECRET: `"${ENV.GOOGLE_OAUTH_CLIENT_SECRET}"`, GOOGLE_TOKEN_ENCRYPTION_KEY: `"${ENV.GOOGLE_TOKEN_ENCRYPTION_KEY}"` }).cfg;
     assert.equal(q.clientSecret, ENV.GOOGLE_OAUTH_CLIENT_SECRET); assert.equal(q.encryptionKey, `"${ENV.GOOGLE_TOKEN_ENCRYPTION_KEY}"`);
     assert.equal(hintFor({ stage: "token-exchange", googleError: "invalid_client" }).includes("引號"), true);
+  });
+
+  // ── 回歸：審核通過上傳時 "Cannot read properties of undefined (reading 'from')" ──
+  console.log("\n上傳回歸測試（Readable.from 錯誤）");
+  await t("回歸：Drive 相關程式不得用動態 import 載入 Node 內建模組（webpack 打包後 Readable 會變 undefined）", () => {
+    for (const f of ["lib/googleDriveOAuth.ts", "lib/driveService.ts", "app/api/admin/uploads/[id]/route.ts"]) {
+      const src = fs.readFileSync(path.join(__dirname, "../..", f), "utf8").split("\n").filter((l) => !/^\s*(\/\/|\*)/.test(l)).join("\n");
+      assert.ok(!/import\(\s*["'](node:)?(stream|fs|crypto|buffer|path)["']\s*\)/.test(src), f + " 含動態 import 內建模組");
+      assert.ok(!/\brequire\(\s*["']stream["']\s*\)/.test(src), f + " 含 require(stream)");
+    }
+    const lib = fs.readFileSync(path.join(__dirname, "../../lib/googleDriveOAuth.ts"), "utf8");
+    assert.match(lib, /^import \{ Readable \} from "stream";/m);
+  });
+  await t("bufferToStream：位元組完整、非 Buffer 會明確報錯、每次呼叫都是新的 stream", async () => {
+    const buf = Buffer.from(Array.from({ length: 70000 }, (_, i) => i % 251));
+    const a = bufferToStream(buf), b = bufferToStream(buf); assert.notStrictEqual(a, b);
+    const chunks: Buffer[] = []; for await (const c of a) chunks.push(Buffer.from(c));
+    assert.ok(Buffer.concat(chunks).equals(buf));
+    assert.throws(() => bufferToStream("text" as unknown as Buffer), /Buffer/); assert.throws(() => bufferToStream(undefined as unknown as Buffer), /Buffer/);
+  });
+  await t("回歸：用「真正的 googleapis」把 stream 以 multipart 上傳到本機假 Drive；資料夾、檔名、MIME、位元組都正確，並設為連結可檢視", async () => {
+    const img = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from(Array.from({ length: 3000 }, (_, i) => (i * 7) % 256)), Buffer.from([0xff, 0xd9])]);
+    const seen: { url?: string; method?: string; ctype?: string; auth?: string; body?: Buffer }[] = [];
+    const srv = http.createServer((req, res) => {
+      const parts: Buffer[] = []; req.on("data", (c) => parts.push(c)); req.on("end", () => {
+        seen.push({ url: req.url, method: req.method, ctype: String(req.headers["content-type"]), auth: String(req.headers.authorization), body: Buffer.concat(parts) });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(req.url!.includes("/permissions") ? { id: "perm1" } : { id: "FILE-REAL-1" }));
+      });
+    });
+    await new Promise<void>((ok) => srv.listen(0, "127.0.0.1", ok));
+    const root = `http://127.0.0.1:${(srv.address() as AddressInfo).port}/`;
+    const tok = await tokenServer(() => ({ status: 200, body: { access_token: ACCESS, expires_in: 3599, token_type: "Bearer" } }));
+    try {
+      const r = await uploadBufferViaOAuth({ buffer: img, filename: "sub-1.jpg", mimeType: "image/jpeg" }, {
+        store: memStore(activeRow()).store, env: ENV, makeClient: tok.makeClient,
+        // googleapis 的 rootUrl 只能在「每次呼叫」時指定；包一層把請求導到本機假 Drive，其餘（stream、multipart）都走真正的 googleapis
+        makeDrive: (client) => {
+          const real = google.drive({ version: "v3", auth: client }); const o = { rootUrl: root };
+          return {
+            files: { create: (p: any) => real.files.create(p, o), delete: (p: any) => real.files.delete(p, o), get: (p: any) => real.files.get(p, o) },
+            permissions: { create: (p: any) => real.permissions.create(p, o) },
+            about: { get: (p: any) => real.about.get(p, o) },
+          };
+        },
+      });
+      assert.deepEqual(r, { fileId: "FILE-REAL-1", viewUrl: "https://drive.google.com/uc?id=FILE-REAL-1" });
+      assert.equal(tok.seen[0]!.form!.grant_type, "refresh_token"); assert.equal(tok.seen[0]!.form!.refresh_token, "RT-secret");
+      const up = seen.find((x) => x.url!.includes("/upload/drive/v3/files"))!; assert.equal(up.method, "POST");
+      assert.match(up.ctype!, /^multipart\/related/); assert.equal(up.auth, "Bearer " + ACCESS);
+      assert.ok(up.url!.includes("uploadType=multipart"));
+      const text = up.body!.toString("latin1");
+      assert.ok(text.includes('"name":"sub-1.jpg"') && text.includes('"folder123456"') && /content-type: image\/jpeg/i.test(text));
+      assert.ok(up.body!.includes(img), "上傳內容的位元組必須完整出現在 multipart 內");
+      const perm = seen.find((x) => x.url!.includes("/permissions"))!; assert.equal(perm.method, "POST"); assert.ok(perm.url!.includes("FILE-REAL-1"));
+      assert.deepEqual(JSON.parse(perm.body!.toString()), { role: "reader", type: "anyone" });
+    } finally { await tok.close(); await new Promise((ok) => srv.close(ok)); }
+  });
+  await t("回歸：上傳程式本身的 TypeError 不會被當成『Google 錯誤』吞掉——日誌帶 stage=upload 與原始訊息（且仍不含機密）", async () => {
+    const err = await uploadBufferViaOAuth({ buffer: "not-a-buffer" as unknown as Buffer, filename: "a.jpg", mimeType: "image/jpeg" }, { store: memStore(activeRow()).store, env: ENV, makeClient: () => fakeClient().c, makeDrive: () => fakeDrive().d }).then(() => null, (e) => e as DriveError);
+    assert.equal(err!.code, "DRIVE_UPLOAD_FAILED"); assert.equal(err!.diag!.stage, "upload"); assert.match(describeError(err), /Buffer/); assert.deepEqual(leaks(describeError(err)), []);
   });
 
   console.log(`\n通過 ${pass}，失敗 ${fail}`);

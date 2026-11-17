@@ -1,4 +1,6 @@
 import crypto from "crypto";
+// 必須是靜態 import：改用動態載入內建模組時，經 Next/webpack 打包後 Readable 會變 undefined（審核上傳會失敗）
+import { Readable } from "stream";
 import { google } from "googleapis";
 import type { OAuth2Client } from "google-auth-library";
 import { DRIVE_MESSAGES, DriveErrorCode } from "@/lib/googleDriveMessages";
@@ -376,19 +378,24 @@ async function authorizedDrive(deps: DriveDeps) {
   return { cfg, drive, client };
 }
 
+/** 把 Buffer 轉成 googleapis 可上傳的 stream；每次重試都要重新建立（stream 只能讀一次）。 */
+export function bufferToStream(buf: Buffer): Readable {
+  if (!Buffer.isBuffer(buf)) throw new TypeError("上傳內容必須是 Buffer");
+  return Readable.from([buf]);
+}
+
 /** 與舊版相同的簽名與回傳值，審核通過時呼叫。 */
 export async function uploadBufferViaOAuth(
   params: { buffer: Buffer; filename: string; mimeType: string },
   deps: DriveDeps
 ): Promise<{ fileId: string; viewUrl: string }> {
-  const { Readable } = await import("stream");
   const { cfg, drive } = await authorizedDrive(deps);
   let fileId: string | undefined;
   try {
     const res = await withRetry<any>(() =>
       drive.files.create({
         requestBody: { name: params.filename, parents: [cfg.folderId] },
-        media: { mimeType: params.mimeType, body: Readable.from(params.buffer) },
+        media: { mimeType: params.mimeType, body: bufferToStream(params.buffer) },
         fields: "id",
         supportsAllDrives: true,
       })
